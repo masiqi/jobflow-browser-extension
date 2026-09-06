@@ -1,0 +1,22 @@
+{
+  "name": "jobflow-browser-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "五站求职批处理 Chrome MV3 扩展，首期猎聘模拟运行",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && vitest run",
+    "verify": "npm run typecheck && npm run build && npm test"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.1",
+    "@types/node": "^22.15.0",
+    "esbuild": "^0.25.9",
+    "jsdom": "^26.1.0",
+    "pdfjs-dist": "^6.2.108",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.7"
+  }
+}

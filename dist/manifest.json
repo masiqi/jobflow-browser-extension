@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "求职批处理助手（模拟版）",
+  "version": "0.1.0",
+  "description": "五站架构，首期猎聘列表批处理模拟；不会发送或投递",
+  "permissions": [
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://*.liepin.com/*",
+    "http://10.1.0.231:28080/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.liepin.com/*"
+      ],
+      "js": [
+        "content/liepin.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "action": {
+    "default_title": "求职批处理设置"
+  }
+}
