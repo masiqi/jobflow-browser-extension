@@ -1,0 +1,1 @@
+-- Intentionally empty. Tests create only synthetic users and records.

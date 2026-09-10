@@ -1,17 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "求职批处理助手（模拟版）",
-  "version": "0.1.0",
-  "description": "五站架构，首期猎聘列表批处理模拟；不会发送或投递",
+  "name": "JobFlow 猎聘草稿助手",
+  "version": "0.2.0",
+  "description": "读取猎聘公开页面并生成可审核草稿；不会发送或投递",
   "permissions": [
     "storage",
-    "tabs"
+    "tabs",
+    "alarms",
+    "sidePanel"
   ],
   "host_permissions": [
-    "https://*.liepin.com/*",
-    "http://10.1.0.231:28080/*",
-    "http://localhost/*",
-    "http://127.0.0.1/*"
+    "https://*.liepin.com/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -27,8 +26,11 @@
       "run_at": "document_idle"
     }
   ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
   "options_page": "options.html",
   "action": {
-    "default_title": "求职批处理设置"
+    "default_title": "打开 JobFlow"
   }
 }

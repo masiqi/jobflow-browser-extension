@@ -1,48 +1,91 @@
-import { chatCompletion } from "./llm";
-import type { ModelSettings, ResumeFact, ResumeProfile } from "./types";
+import { z } from "zod";
+import type { ResumeFact, ResumeProfile } from "./types";
+
+const modelFactSchema = z.object({
+  id: z.string().min(1).max(80),
+  text: z.string().min(1).max(500),
+  keywords: z.array(z.string().min(1).max(80)).max(20),
+  evidence: z.string().min(1).max(800)
+}).strict();
+
+const modelProfileSchema = z.object({
+  summary: z.string().min(1).max(2000),
+  targetRoles: z.array(z.string().min(1).max(120)).max(20),
+  skills: z.array(z.string().min(1).max(120)).max(80),
+  facts: z.array(modelFactSchema).min(1).max(30),
+  constraints: z.array(z.string().min(1).max(300)).max(30).default([])
+}).strict();
 
 export async function sourceHash(text: string): Promise<string> {
   const bytes = new TextEncoder().encode(text.replace(/\r\n/g, "\n").trim());
   const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }
 
-function factsFromText(text: string): ResumeFact[] {
-  const lines = text.split(/\n+/).map((line) => line.replace(/^[-*#\d.\s]+/, "").trim()).filter((line) => line.length >= 10);
-  return lines.slice(0, 30).map((line, index) => ({ id: `resume_${index + 1}`, text: line.slice(0, 300), keywords: line.split(/[，。；、\s/()（）]+/).filter((word) => word.length >= 2).slice(0, 12), evidence: line.slice(0, 500) }));
-}
-
-export async function buildResumeProfile(sourceName: string, sourceText: string, model?: ModelSettings): Promise<ResumeProfile> {
-  const clean = sourceText.replace(/\u0000/g, "").trim();
-  if (clean.length < 100) throw new Error("简历文本太短，无法建立画像");
-  if (model?.apiKey.trim()) {
-    const raw = await chatCompletion({ ...model, temperature: 0.1 }, [
-      { role: "system", content: "你是严谨的简历事实抽取器。只抽取文本中明确出现的事实，不推断、不美化、不输出联系方式。只返回JSON对象：{summary,targetRoles,skills,facts:[{id,text,keywords,evidence}],prohibitions}。facts最多30条，evidence必须是原文短摘录。特别禁止把新浪经历写成CTO/技术负责人，禁止把当前新致职位写成CTO/技术负责人/架构师。" },
-      { role: "user", content: `<untrusted_resume>\n${clean.slice(0, 30000)}\n</untrusted_resume>` }
-    ]);
-    try {
-      const value = JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/g, "")) as Partial<ResumeProfile>;
-      const facts = Array.isArray(value.facts) ? value.facts.filter((item): item is ResumeFact => Boolean(item && typeof item.id === "string" && typeof item.text === "string" && typeof item.evidence === "string" && Array.isArray(item.keywords))).slice(0, 30) : [];
-      if (typeof value.summary === "string" && facts.length > 0) {
-        return {
-          version: 1, sourceHash: await sourceHash(clean), sourceName, analyzedAt: new Date().toISOString(), summary: value.summary.slice(0, 2000),
-          targetRoles: Array.isArray(value.targetRoles) ? value.targetRoles.filter((item): item is string => typeof item === "string").slice(0, 20) : [],
-          skills: Array.isArray(value.skills) ? value.skills.filter((item): item is string => typeof item === "string").slice(0, 80) : [], facts,
-          prohibitions: [...new Set([...(Array.isArray(value.prohibitions) ? value.prohibitions.filter((item): item is string => typeof item === "string") : []), "新浪经历不得写成CTO或技术负责人", "当前新致正式职位只能写Agent开发工程师", "不得虚构Java能力、百分比指标、薪资到岗或出差承诺"])]
-        };
-      }
-    } catch { /* invalid model output falls back to deterministic local extraction */ }
+function parseJson(raw: unknown): unknown {
+  if (typeof raw !== "string") return raw;
+  let stripped = raw.trim();
+  const fence = String.fromCharCode(96).repeat(3);
+  if (stripped.startsWith(fence)) {
+    const firstLineEnd = stripped.indexOf("\n");
+    stripped = firstLineEnd >= 0 ? stripped.slice(firstLineEnd + 1) : "";
+    if (stripped.endsWith(fence)) stripped = stripped.slice(0, -fence.length).trim();
   }
-  const facts = factsFromText(clean);
+  try {
+    return JSON.parse(stripped);
+  } catch {
+    throw new Error("模型未返回有效的简历画像 JSON");
+  }
+}
+
+function comparable(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, "");
+}
+
+export function createDraftResumeProfile(input: {
+  sourceName: string;
+  sourceKind: ResumeProfile["sourceKind"];
+  sourceHash: string;
+  normalizedText: string;
+  modelOutput: unknown;
+  version?: number;
+}): ResumeProfile {
+  const parsed = modelProfileSchema.parse(parseJson(input.modelOutput));
+  const normalizedSource = comparable(input.normalizedText);
+  const seenIds = new Set<string>();
+  const facts: ResumeFact[] = parsed.facts.map((fact) => {
+    if (seenIds.has(fact.id)) throw new Error("模型返回了重复的简历事实 ID");
+    seenIds.add(fact.id);
+    if (!normalizedSource.includes(comparable(fact.evidence))) {
+      throw new Error("简历事实证据无法在导入文本中定位");
+    }
+    return { ...fact, approved: false };
+  });
   return {
-    version: 1,
-    sourceHash: await sourceHash(clean),
-    sourceName,
+    id: crypto.randomUUID(),
+    version: input.version ?? 1,
+    state: "draft",
+    sourceHash: input.sourceHash,
+    sourceName: input.sourceName,
+    sourceKind: input.sourceKind,
     analyzedAt: new Date().toISOString(),
-    summary: clean.slice(0, 1200),
-    targetRoles: ["Agent开发", "AI应用研发", "Agent平台架构", "技术负责人", "CTO"],
-    skills: [...new Set(facts.flatMap((fact) => fact.keywords))].slice(0, 60),
+    summary: parsed.summary,
+    targetRoles: [...new Set(parsed.targetRoles)],
+    skills: [...new Set(parsed.skills)],
     facts,
-    prohibitions: ["新浪经历不得写成CTO或技术负责人", "当前新致正式职位只能写Agent开发工程师", "不得虚构Java能力、百分比指标、薪资到岗或出差承诺"]
+    constraints: [...new Set(parsed.constraints)]
+  };
+}
+
+export function activateResumeProfile(profile: ResumeProfile): ResumeProfile {
+  const approvedFacts = profile.facts.filter((fact) => fact.approved);
+  if (!approvedFacts.length) throw new Error("至少确认一条简历事实后才能启用画像");
+  return {
+    ...profile,
+    state: "active",
+    activatedAt: new Date().toISOString(),
+    facts: approvedFacts
   };
 }

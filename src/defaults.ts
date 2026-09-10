@@ -1,48 +1,71 @@
-import type { ExtensionSettings, FilterSettings } from "./types";
+import type { ExtensionSettings, JdRuleSettings, ModelProvider } from "./types";
 
-export const FILTERS: FilterSettings = {
-  cityKeywords: ["北京"],
-  minSalaryK: 25,
-  requiredDirectionMatch: "any",
-  schoolRestrictionMode: "review",
-  schoolRestrictionKeywords: ["985", "211", "双一流", "QS100", "QS前100", "top2", "清北"],
-  directions: [
-    { id: "agent", label: "Agent / 智能体", mode: "require", keywords: ["agent", "智能体", "大模型", "llm", "rag", "mcp", "知识库", "ai应用"] },
-    { id: "java", label: "Java 主导", mode: "exclude", keywords: ["java", "spring", "springboot", "spring cloud"] },
-    { id: "gpu", label: "GPU / CUDA", mode: "ignore", keywords: ["gpu", "cuda", "算子", "推理加速", "并行计算"] },
-    { id: "chip", label: "芯片研发", mode: "ignore", keywords: ["芯片", "asic", "fpga", "eda", "rtl", "流片", "数字前端", "模拟电路"] },
-    { id: "mobile", label: "移动端", mode: "exclude", keywords: ["android", "ios", "kotlin", "swift"] },
-    { id: "product", label: "AI 产品", mode: "review", keywords: ["产品经理", "产品设计", "增长投放"] }
-  ],
-  customIncludeAny: [],
-  customIncludeAll: [],
-  customExcludeAny: [],
-  customReviewAny: []
+export const TECHNOLOGY_CATALOG = [
+  { id: "java", label: "Java", aliases: ["java", "spring", "spring boot", "springcloud", "spring cloud"] },
+  { id: "dotnet", label: ".NET", aliases: [".net", "c#", "asp.net"] },
+  { id: "php", label: "PHP", aliases: ["php", "laravel", "thinkphp"] },
+  { id: "android", label: "Android", aliases: ["android", "kotlin"] },
+  { id: "ios", label: "iOS", aliases: ["ios", "swift", "objective-c"] },
+  { id: "cpp", label: "C / C++", aliases: ["c++", "cpp"] }
+] as const;
+
+export const MODEL_PROVIDER_PRESETS: Record<
+  Exclude<ModelProvider, "custom">,
+  { endpoint: string; defaultModel: string }
+> = {
+  openai: { endpoint: "https://api.openai.com/v1", defaultModel: "gpt-5-mini" },
+  deepseek: { endpoint: "https://api.deepseek.com/v1", defaultModel: "deepseek-chat" },
+  openrouter: { endpoint: "https://openrouter.ai/api/v1", defaultModel: "" }
+};
+
+export const DEFAULT_RULES: JdRuleSettings = {
+  version: 1,
+  schoolPedigree: "disabled",
+  travel: "disabled",
+  rejectOutsourcing: false,
+  rejectDispatch: false,
+  rejectLongTermClientSite: false,
+  rejectNightShift: false,
+  rejectRotatingShift: false,
+  rejectBigSmallWeek: false,
+  rejectSingleRestDay: false,
+  rejectLongTermOnCall: false,
+  rejectedPrimaryTechnologies: []
 };
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
+  rules: DEFAULT_RULES,
   model: {
-    endpoint: "http://10.1.0.231:28080/v1",
-    model: "gpt-5.5",
-    apiKey: "",
-    persistApiKey: false,
-    timeoutSeconds: 120,
-    temperature: 0.35,
-    extraHeaders: {}
+    route: "byok",
+    provider: "openai",
+    endpoint: MODEL_PROVIDER_PRESETS.openai.endpoint,
+    model: MODEL_PROVIDER_PRESETS.openai.defaultModel,
+    rememberKey: false
   },
-  filters: FILTERS,
-  resumeProfile: null,
-  liveUnlocked: false,
-  maxJobsPerRun: 40,
-  detailTimeoutSeconds: 90
+  maxJobsPerBatch: 10,
+  detailTimeoutSeconds: 90,
+  launcherVisible: true
 };
 
 export const STORAGE_KEYS = {
-  settings: "jobflow.settings.v1",
-  run: "jobflow.run.v1",
-  ledger: "jobflow.ledger.v1",
-  secret: "jobflow.apiKey.v1"
+  settings: "jobflow.settings.v2",
+  run: "jobflow.run.v2",
+  scanPreview: "jobflow.scanPreview.v2",
+  sessionKey: "jobflow.byok.session.v2",
+  rememberedKey: "jobflow.byok.remembered.v2",
+  deviceOwner: "jobflow.deviceOwner.v2",
+  supabaseSession: "jobflow.supabase.session.v1"
 } as const;
 
-export const LIVE_CONFIRMATION_PHRASE = "我确认真实发送";
-export const PROFILE_PROMPT_VERSION = "resume-profile-v1";
+export const LEGACY_STORAGE_KEYS = [
+  "jobflow.settings.v1",
+  "jobflow.run.v1",
+  "jobflow.ledger.v1",
+  "jobflow.apiKey.v1"
+] as const;
+
+export const PROMPT_VERSIONS = {
+  resume: "resume-profile-v2",
+  suitability: "job-suitability-v2",
+  greeting: "greeting-v2"
+} as const;

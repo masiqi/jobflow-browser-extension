@@ -1,286 +1,364 @@
-# JobFlow 求职批处理助手（Chrome MV3，猎聘 dry-run）
+# JobFlow 猎聘草稿助手
 
-这是一个面向求职筛选流程的 Chrome Manifest V3 扩展。它在猎聘职位列表页扫描并去重职位，通过后台队列逐个读取详情页，执行本地硬规则与 OpenAI-compatible 模型评估，生成招呼语草稿，并把模拟结果保存在当前 Chrome 配置中。
+JobFlow 是一个 Chrome Manifest V3 扩展。用户先使用猎聘自带的搜索和筛选器完成粗筛，扩展读取当前页面已经加载的职位卡片，串行打开公开详情页，执行有限且可解释的 JD 规则与 LLM 适配度判断，最后生成可审核、可编辑、可追溯的招呼语草稿。
 
-> **当前状态：v0.1 原型，仅支持猎聘 dry-run。** 它不填写表单、不点击“聊一聊”、不发送消息、不投递、不上传简历，也不调用招聘站点私有写接口。BOSS 直聘、前程无忧（51job）、智联招聘和拉勾只有类型/架构预留，尚未接入。
+> 当前版本是 v0.2 draft-only MVP。不会点击投递或聊天按钮，不会填写表单，不会向猎聘上传简历，不会发送消息，也不会调用招聘平台私有写 API。
 
-## 1. 当前能力与限制
+## 当前能力
 
-### 已实现
+### 账号与后端
 
-- 识别猎聘 `https://*.liepin.com/zhaopin/` 列表页；
-- 从当前已渲染的 DOM 中读取职位卡片，并按职位 ID 去重；
-- 列表页初筛后，由 MV3 service worker 串行打开后台详情标签页；
-- 读取猎聘 `/job/<id>.shtml` 与 `/a/<id>.shtml` 详情页并二次硬筛；
-- 支持城市、薪资上限、方向规则、学校限制和自定义包含/排除/复核词；
-- 导入小于 10 MB 的 Markdown、TXT 或文本型 PDF 简历，计算 SHA-256 并生成版本化事实画像；
-- 有 API Key 时调用模型做一次简历事实抽取；无 Key、模型输出无效时使用本地确定性抽取；
-- 后续 JD 评估只发送画像与 JD，不重复发送原始简历；
-- 调用 OpenAI-compatible `chat/completions`，校验模型决策和 100–160 字招呼语草稿；
-- 将队列、状态与模拟台账写入 `chrome.storage.local`；API Key 默认写入 `chrome.storage.session`；
-- 暂停、继续、取消；模拟成功台账写入 `dry_run:no_platform_write` 证据；
-- 自动测试覆盖硬规则、猎聘 DOM 提取和构建产物安全门。
+- Supabase 邮箱 + 密码开放注册；
+- 注册时不验证邮箱，不需要邀请码；
+- 暂不提供密码找回、支付或自动 VIP 开通；
+- Postgres + Row Level Security 隔离每个用户的画像、规则、职位、评估、草稿和历史；
+- Edge Function 验证 JWT、代理模型请求并通过命名 RPC 写入受保护状态；
+- VIP 权益与托管模型额度保存在 private schema，不能由扩展修改；
+- 默认构建不绑定任何远程 Supabase 项目，必须在构建时显式提供公开项目配置。
 
-### 未实现或不应误解为已实现
+### 简历与画像
 
-- **没有 live 模式。** 类型中虽然预留了 `live`、`sent`、确认短语等字段，但运行入口强制创建 `dry_run`；真实发送分支会转为 `needs_review`。
-- 没有点击招聘站点按钮、填写表单、发消息、投递、上传简历、调用私有写 API 的代码。
-- BOSS、51job、智联、拉勾没有 content script、DOM 适配器、manifest 权限或端到端流程。
-- 没有云端同步、远程报表、跨电脑共享台账；当前不需要 Cloudflare/Hono/D1。
-- 没有 CI 配置、发布包、Chrome Web Store 流程或自动化浏览器端到端测试。
-- 猎聘选择器依赖公开页面 DOM；页面改版、未登录、风控或职位卡片未加载都可能导致扫描为空。
-- PDF 仅支持有文本层的文件，不包含 OCR。
-- UI 目前只显示批次汇总和前 40 个列表预览；没有完整台账查看/导出界面。
-- MV3 worker 的恢复机制较弱：只在安装/浏览器启动时尝试恢复；浏览器休眠或 worker 被回收后的运行中队列仍需专项验证。
+- 支持带文本层的 PDF、DOCX、UTF-8 TXT、Markdown 和粘贴文本；
+- 上传文件最大 10 MiB；
+- 文件结构在客户端验证，不能只依赖扩展名；
+- 原始文件只保存在当前 Chrome profile 的 IndexedDB；
+- Supabase 不保存原始文件或完整规范化简历文本；
+- 模型只接收客户端提取后的规范化文本；
+- 模型结果先成为待审核画像；
+- 用户必须审核事实并明确启用画像，才能处理职位；
+- 更换本地原件后旧画像变为 stale；
+- 相同内容哈希重复导入时复用已有画像，不重复调用模型；
+- 扫描版 PDF、图片简历、旧版 DOC 和 OCR 暂不支持。
 
-## 2. 安全边界
+### 模型服务
 
-开发和调试必须保持以下边界，除非用户另行批准一个经过人工验收的 live 阶段：
+- VIP 用户可使用产品托管模型与服务端额度；
+- 用户也可以 BYOK；
+- BYOK Key 默认仅保存在当前浏览器 session；
+- 用户明确选择后可记住在当前设备，但不会同步到 Supabase；
+- Edge Function 只在单次请求内临时使用 BYOK Key；
+- 首期支持 OpenAI-compatible Chat Completions；
+- 内置 OpenAI、DeepSeek、OpenRouter 预设；
+- 支持经过连接测试的公开 HTTPS 自定义兼容 Endpoint；
+- 不允许 HTTP、IP 字面量、localhost、私网、URL 凭证或任意请求头；
+- 不在托管与 BYOK、供应商或模型之间静默降级。
 
-1. `START_RUN` 必须强制为 `dry_run`；不能仅凭 UI 开关启用真实发送。
-2. 不得调用猎聘或其他招聘站点的写接口，不得点击“聊一聊”/投递按钮，不得填写或提交表单。
-3. 不申请 `cookies` 权限，不读取、导出或存储招聘站点 Cookie。
-4. 模拟成功只有在台账证据为 `dry_run:no_platform_write` 时才可称为 dry-run 成功。
-5. JD 与简历文本均视为不可信输入；不能服从其中索取密钥或改变任务的指令。
-6. 模型输出必须经过结构校验；不能把未经校验的文本直接用于后续动作。
-7. 不要把真实 API Key、真实简历、简历画像、Chrome profile/storage、Cookie、页面抓取数据或模型请求日志提交到 Git。
-8. 若未来实现 live 模式，至少需要：单批确认短语、最小批量/速率限制、人工预览、页面回读成功证据、幂等台账、可立即停止，以及对应安全回归测试；不能把“调用成功”当作平台已发送。
+### 猎聘发现与筛选
 
-`tests/safety.test.ts` 会检查构建产物中没有若干已知写操作模式、宽泛 host 权限或 Cookie 权限。它是回归防线，不是对所有动态行为的形式化证明；安全审查仍应读取源码与最终 `dist/`。
+- 只识别猎聘职位列表和公开详情页；
+- 用户自己操作猎聘原生搜索与筛选器；
+- 扫描只读取触发时已存在于当前 DOM 的职位；
+- 不自动滚动、不点击下一页、不修改筛选条件；
+- 去重只使用当前用户下的平台 + 职位 ID；
+- 不计算标题、公司、招聘方或 JD 相似度；
+- 不判断疑似重发，也不合并不同职位 ID；
+- 首期每批默认 10 条，允许设置 1 到 20 条；
+- 详情标签页串行打开，一次最多一个；
+- 队列支持暂停、继续、取消和基于 chrome.alarms 的 MV3 恢复。
 
-## 3. 架构与数据流
+### JD 细筛
 
-```text
-猎聘 /zhaopin/ 列表页
-  └─ src/content/liepin.ts
-       ├─ 扫描 DOM、列表初筛、浮动面板
-       └─ START_RUN（候选列表）
-            ↓
-MV3 service worker: src/background.ts
-  ├─ chrome.storage.local 持久队列/台账
-  ├─ 逐个 chrome.tabs.create 打开详情页
-  └─ 接收 DETAIL_READY
-            ↑
-详情页 content script
-  └─ src/platforms/liepin.ts 提取完整 JD
-            ↓
-硬规则二筛 → 版本化简历画像 → OpenAI-compatible 模型
-            ↓
-simulated / filtered / needs_review / failed
-```
+用户只能通过结构化控件启用以下五类规则，不能填写任意自然语言、关键词或正则：
 
-- **Content script** 只负责猎聘页面识别、DOM 提取、列表面板和消息转发。
-- **Service worker** 是队列编排器：一次处理一个职位，保存状态，管理详情标签页与超时。
-- **本地规则层** 在模型调用前执行，列表信息不足时可先标为复核，详情页再作最终硬判断。
-- **模型层** 使用 `POST .../chat/completions`，要求 JSON 对象响应。
-- **存储层** 使用当前扩展在当前 Chrome profile 下的 `chrome.storage.local/session`；数据不是仓库文件，也不会自动跨设备同步。
-- **构建层** 使用 esbuild 将 TypeScript 打为 IIFE，并复制选项页与 PDF.js worker；`scripts/build.mjs` 同时生成 `dist/manifest.json`。
+1. 强制 985、211、双一流等学校背景要求；
+2. 出差、驻点、外派和异地流动；
+3. 外包、劳务派遣和长期客户驻场；
+4. 夜班、倒班、大小周、单休和长期 on-call；
+5. 从有限目录选择的不接受核心技术栈。
 
-### 目录
+明确命中会排除，否定句不会命中，偏好或歧义表达进入人工复核。每个结果保留规则版本、原因和最小 JD 证据。
 
-```text
+### LLM 判断与草稿
+
+- LLM 在硬规则后返回 proceed、review 或 exclude；
+- 数字分数不能单独决定淘汰；
+- 标题不同、缺一个技能或只缺加分项不能单独淘汰；
+- 模型淘汰必须引用核心 JD 证据和画像冲突；
+- 同一职位 ID 的模型淘汰会永久阻止自动重复处理；
+- 用户仍可在记录中心选择“作为例外继续”，原判断不会被删除；
+- 每个可继续职位生成一条当前招呼语草稿；
+- 目标长度 80 到 140 个中文字符，绝对上限 200；
+- 草稿必须关联一项 JD 要求和一到两项已批准事实；
+- 联系方式、未经确认的求职承诺、Markdown 和无证据事实会被拒绝；
+- 模型生成、用户编辑和重新生成都形成不可覆盖的修订历史。
+
+## 界面
+
+- 猎聘页面右侧显示一个 42px 的轻量入口；
+- 点击入口打开原生 Chrome side panel；
+- side panel 负责扫描、预览、批次控制、进度和最近记录；
+- 独立扩展管理页负责账号、简历画像、规则、模型、人工复核、职位记录和待发草稿；
+- content script 不再注入大型浮动面板；
+- 当前管理页没有真实发送按钮。
+
+## 安全边界
+
+以下约束是当前构建的硬边界：
+
+1. 运行入口不存在 live 模式；
+2. 可执行领域状态不包含 sent、applied 或 contacted；
+3. 不点击招聘站点控件，不填写或提交表单；
+4. 不向招聘站点上传文件；
+5. 不调用招聘站点私有写 API；
+6. 不申请 cookies 权限；
+7. 不读取、导出或保存招聘站点 Cookie；
+8. host permissions 只包含猎聘和构建时指定的一个精确 Supabase origin；
+9. 不添加 http://*/* 或 https://*/*；
+10. 简历、JD 和模型输出均视为不可信输入；
+11. 模型输出必须在服务端和客户端按结构与证据校验；
+12. 不记录完整简历、完整 JD、提示词、原始模型输出、API Key 或 Authorization token；
+13. 测试 fixture 只使用合成数据；
+14. 不把草稿或 dry-run 描述成真实投递。
+
+安全测试检查 manifest、源文件和最终构建中的已知危险模式。测试是回归防线，不是对所有动态行为的形式化证明。
+
+## 目录
+
+~~~text
 .
-├── AGENTS.md                    # 调试 agent 的工作边界与交付检查表
-├── README.md                    # 本文档
-├── package.json                 # npm scripts 与开发依赖
-├── package-lock.json            # npm 锁文件（lockfile v3）
-├── scripts/build.mjs            # esbuild 配置及 MV3 manifest 生成源
 ├── src/
-│   ├── background.ts            # 队列、详情标签页、模型决策、状态机
-│   ├── content/liepin.ts        # 猎聘 content script 与页面面板
-│   ├── platforms/liepin.ts      # 猎聘列表/详情 DOM 适配器
-│   ├── filters.ts               # 硬规则与职位 URL/键规范化
-│   ├── prompt.ts                # JD 评估 prompt 与模型输出校验
-│   ├── llm.ts                   # OpenAI-compatible HTTP 客户端
-│   ├── resume.ts / pdf.ts       # 简历画像与 PDF 文本提取
-│   ├── storage.ts / ledger.ts   # Chrome storage 封装
-│   ├── defaults.ts / types.ts   # 默认配置、存储键与领域类型
-│   └── options.*                # 扩展选项页
-├── tests/                       # Vitest：filters、liepin、safety
-├── tsconfig.json                # strict TypeScript，无 emit
-└── dist/                        # 已跟踪的可加载构建产物；不要手改
-```
+│   ├── backend/              # Supabase 公开客户端、RLS DTO 解码
+│   ├── domain/               # 状态、事件、消息 schema、纯状态机
+│   ├── local/                # IndexedDB 本地简历原件
+│   ├── content/liepin.ts     # 猎聘入口和只读 DOM 桥
+│   ├── platforms/liepin.ts   # 列表与详情提取
+│   ├── background.ts         # Auth、队列、tab lease、Edge 调用
+│   ├── filters.ts            # 五类 JD 规则
+│   ├── prompt.ts             # 模型输入与双重输出校验
+│   ├── pdf.ts / resume.ts    # 文件解析、哈希、画像生命周期
+│   ├── sidepanel.*           # 猎聘工作台
+│   └── options.*             # 完整管理台
+├── supabase/
+│   ├── migrations/           # 表、RLS、RPC、private schema
+│   ├── functions/            # model-gateway
+│   └── tests/                # pgTAP
+├── tests/                    # Vitest 合成测试
+├── scripts/
+│   ├── build.mjs
+│   ├── test-supabase-integration.mjs
+│   └── smoke-extension.mjs
+├── dist/                     # 已跟踪的 Chrome 构建产物
+├── docs/adr/                 # 已确认的产品与架构决策
+└── UBIQUITOUS_LANGUAGE.md    # 领域统一语言
+~~~
 
-## 4. 环境要求
+## 环境要求
 
-已在以下本机工具链验证：
+- Node.js 22 或更高版本；
+- npm；
+- Chrome 120 或更高版本；
+- Supabase CLI；
+- Docker 或兼容容器运行时，用于本地 Supabase；
+- Playwright Chromium，只在自动 Chrome smoke 时需要。
 
-- Node.js `v22.22.2`
-- npm `10.9.7`
-- Chrome 120+（构建目标为 `chrome120`；实际扩展加载和猎聘页面行为仍需人工验证）
+当前开发验证使用了 Node.js 24、npm 11、Supabase CLI 2.109.1 和 Docker 28。
 
-建议使用 Node.js 22 LTS 与 npm 10。仓库没有声明 `engines` 或 `packageManager`，因此版本不兼容时先对照上述已验证版本，不要随意更新锁文件。
+## 安装和基础验证
 
-## 5. 安装、构建与测试
-
-从干净克隆开始：
-
-```bash
-cd /path/to/jobflow-browser-extension
+~~~bash
 npm ci
-npm run typecheck
-npm test
-```
-
-可用 scripts：
-
-```bash
-npm run typecheck  # tsc --noEmit
-npm run build      # 清空并重建 dist/
-npm test           # 先 build，再运行 vitest run
-npm run verify     # typecheck → build → test（test 内还会再 build 一次）
-```
-
-`dist/` 是 Chrome 实际加载目录且已纳入版本控制。源码改动后必须运行 `npm run build`，不要直接编辑 `dist/`。提交前至少运行 `npm run verify`，再确认构建产物 diff 符合预期。
-
-## 6. 在 Chrome 中加载与调试
-
-1. 运行 `npm ci && npm run build`。
-2. 打开 `chrome://extensions`。
-3. 开启右上角“开发者模式”。
-4. 点击“加载已解压的扩展程序”，选择仓库中的 **`dist/`**，不是仓库根目录。
-5. 在扩展卡片中点击“详细信息” → “扩展程序选项”，配置模型、筛选条件和简历画像。
-6. 固定扩展不是必需的；列表页入口是网页右下角的“批量模拟”。
-
-### 源码改动后的刷新顺序
-
-```text
-修改 src/ 或 scripts/build.mjs
-→ npm run build
-→ chrome://extensions 中点击该扩展的“重新加载/Reload”
-→ 刷新已经打开的猎聘目标页
-```
-
-仅刷新网页不会更新 service worker 和 manifest；仅 Reload 扩展也不会替换已注入旧 content script 的页面，所以两步都要做。改变 `host_permissions` 后必须重新构建并 Reload。
-
-### Chrome 调试入口
-
-- **Service worker / background 日志**：`chrome://extensions` → 本扩展卡片 → “Service Worker”/“检查视图”链接，打开 DevTools。队列、`chrome.tabs`、消息处理和模型请求错误在这里查。
-- **猎聘 content script / DOM 提取**：在猎聘列表页或后台打开的职位详情页按 `⌥⌘I`（macOS）打开 DevTools；在 Console 的执行上下文下拉框选择扩展 content script（显示为扩展名或 `chrome-extension://...`）。Elements 中也可检查宿主节点 `#jobflow-batch-root`，面板内容位于其 open Shadow DOM。
-- **选项页**：打开扩展选项页后对页面按 `⌥⌘I`；简历解析、保存设置等前端错误在此查看。
-- **存储**：对应 DevTools 的 Application → Storage → Extension Storage（不同 Chrome 版本名称可能略有差异）检查 `jobflow.settings.v1`、`jobflow.run.v1`、`jobflow.ledger.v1`；API Key 默认位于 session storage，不应截图、复制到 issue 或提交。
-
-## 7. 配置模型与敏感信息
-
-### Endpoint 行为
-
-选项页接受 OpenAI-compatible endpoint：
-
-- 输入以 `/chat/completions` 结尾：原样使用；
-- 输入以 `/v1` 等版本段结尾：追加 `/chat/completions`；
-- 其他地址：追加 `/v1/chat/completions`。
-
-请求包含 `model`、`messages`、`stream: false`、`temperature`、`max_tokens: 800` 和 `response_format: {"type":"json_object"}`。模型服务必须兼容这些字段及 Bearer Authorization。
-
-**实际权限限制：选项页能填写任意 endpoint，不代表 Chrome 允许请求。** 当前 `scripts/build.mjs` 生成的 `host_permissions` 只允许：
-
-```text
-https://*.liepin.com/*
-http://10.1.0.231:28080/*
-http://localhost/*
-http://127.0.0.1/*
-```
-
-默认 endpoint 是内网 `http://10.1.0.231:28080/v1`，它只是环境相关默认值，不保证其他机器可达。改用其他模型域名、端口或 HTTPS 服务时，必须同步修改 `scripts/build.mjs` 的 `host_permissions`，运行 `npm run build`，在 `chrome://extensions` Reload 扩展，再刷新目标页；同时更新 `tests/safety.test.ts` 中的精确权限断言。只改选项页 endpoint 往往会得到 `Failed to fetch`。
-
-权限应按具体 origin 最小化添加，禁止为了省事添加 `http://*/*` 或 `https://*/*`。
-
-### API Key 与简历
-
-- 仓库中的默认 API Key 为空；禁止在源码、测试 fixture、README、构建产物、命令历史或提交信息中写入真实密钥。
-- 默认“不持久保存 API Key”：保存到 `chrome.storage.session`；勾选持久保存后会进入 `chrome.storage.local`。两者都只是浏览器扩展存储，不是系统 Keychain；共享 Chrome profile、恶意扩展或本机失陷时仍有泄露风险。
-- `extraHeaders`、模型超时和温度存在于内部配置类型/默认值中，目前选项页没有编辑控件。
-- 原始简历文件不会上传到招聘站点，也不会保存进仓库；生成的画像会保存在 `chrome.storage.local`。有 Key 时，导入阶段会把最多 30,000 字符的简历文本发送给所配置的模型服务一次。
-- 每个 JD 评估会把画像、筛选结果与最多 12,000 字符的 JD 发送给模型服务。选择 endpoint 前必须确认其隐私、日志和保留策略。
-- 不要提交 Chrome User Data、扩展 storage 导出、真实简历/PDF、抓取页面、日志或包含真实职位/候选人信息的测试数据。测试应使用合成数据。
-
-## 8. 猎聘 dry-run 使用步骤
-
-1. 在 Chrome 中加载 `dist/`。
-2. 打开扩展选项页。
-3. 配置可访问且在 `host_permissions` 内的模型 Endpoint、Model 和 API Key。若暂时不配置 Key，简历可做本地画像，但后续 JD 模型评估会失败并记录“未配置 API Key”。
-4. 调整筛选：城市关键词、最低月薪上限、方向模式、学校规则和自定义词；设置每批职位数（UI 限制 1–100，默认 40）。点击“保存设置”。
-5. 选择小于 10 MB 的 `.md`、`.txt` 或带文本层的 `.pdf` 简历，点击“导入并生成画像”，确认页面显示文件名、SHA-256 和事实条数。
-6. 在同一 Chrome profile 中登录猎聘，并打开精确路径 `https://www.liepin.com/zhaopin/`。等待职位卡片渲染；插件只扫描当前 DOM，不主动翻页或滚动加载。
-7. 刷新页面后，在右下角点击“批量模拟”。检查“列表去重”“硬规则后”和本批上限。
-8. 点击“开始模拟”。扩展会逐个创建非激活详情标签页，读取后自动关闭；不要在运行中手动关闭这些标签页。
-9. 在面板观察 `running/paused/completed/cancelled`、进度、模拟成功和失败数；可暂停、继续或取消。
-10. 调试台账时从 Extension Storage 读取 `jobflow.ledger.v1`；只有 `status: "simulated"` 且 `evidence: "dry_run:no_platform_write"` 才表示本地模拟完成，**不表示已联系或已投递**。
-
-建议首次只配置 1–3 个职位，人工核对职位字段、筛选原因、画像事实 ID 和招呼语，再扩大批量。
-
-## 9. 常见故障排查
-
-| 现象 | 检查与处理 |
-|---|---|
-| Chrome 提示 manifest 缺失 | 加载的是仓库根目录；改选 `dist/`，若目录不存在先执行 `npm run build`。 |
-| 改源码后行为不变 | 依次执行 `npm run build` → 扩展页 Reload → 刷新猎聘页；检查加载路径确实是当前仓库的 `dist/`。 |
-| 列表页没有“批量模拟” | URL pathname 必须为 `/zhaopin/`；确认扩展启用、站点访问权限允许、页面已刷新；查看页面 DevTools 的 content script 错误。 |
-| 扫描为 0 或字段为空 | 等职位卡片渲染后点“重新扫描”；确认页面未被登录墙/风控替换；猎聘 DOM 可能改版，保存脱敏 DOM fixture 后更新 `src/platforms/liepin.ts` 与测试。 |
-| 点击开始提示先导入简历 | 在选项页导入支持的文件并生成画像，然后返回列表页点“重新扫描”或刷新。 |
-| PDF 提示文本不足 | 文件可能是扫描件或没有文本层；转换为 Markdown/TXT，当前版本没有 OCR。 |
-| “未配置 API Key” | 本地画像可以无 Key 生成，但 JD 评估必须调用模型；在选项页填写 Key并保存。 |
-| `Failed to fetch` / CORS / 网络错误 | 先检查 service worker Console；确认 endpoint 规范、服务可达、TLS/CORS；尤其确认 origin 已加入 `scripts/build.mjs` 的 `host_permissions`，然后 build + Reload + 刷新。 |
-| 模型服务 HTTP 4xx/5xx | 核对 Key、Model、endpoint 拼接和服务是否支持 `response_format`；服务端日志不得包含可提交的真实简历或 Key。 |
-| “模型决策结构无效”或招呼语校验失败 | 模型未返回严格 JSON，或 apply 结果不满足 100–160 字、两个不同事实 ID、唯一结尾问题；检查 prompt/模型兼容性，保留脱敏输出做回归测试。 |
-| 详情 DOM 30 秒未准备好 / 90 秒超时 | 检查后台详情页是否被登录墙、验证码、风控或改版阻断；分别查看详情页 content script 和 service worker Console。两个计时器来源不同。 |
-| 运行卡住或浏览器重启后未继续 | 检查 `jobflow.run.v1` 的当前 item、对应标签页和 worker 日志；当前恢复机制尚不完备。必要时先“取消”再以小批次重跑，不要直接伪造台账成功。 |
-| 规则修改后列表统计没更新 | 点击“重新扫描”或刷新列表页；面板初始化时会缓存设置。 |
-| 测试修改了 `dist/` | `npm test` 会先执行 build，这是预期行为；检查 `git diff -- dist`，构建产物应与源码一致。 |
-
-## 10. 下一阶段开发任务与验收标准
-
-以下按优先级排序。除非用户明确批准，P0–P2 都必须维持 dry-run，不应提前实现真实发送。
-
-### P0：巩固可调试性与安全回归
-
-- 为 `background.ts` 状态机增加单元测试：开始、跳过、详情成功/失败、暂停/继续/取消、超时和已有台账。
-- 为存储合并、session/local API Key 行为、endpoint 规范化和 prompt 输出校验补测试。
-- 把 service worker 关键状态转移做成不含敏感正文/Key的结构化诊断日志。
-- 增加 secrets 扫描和至少一个可重复的 CI 验证入口；评估是否继续跟踪 `dist/`。
-
-**验收：** `npm run verify` 全绿；状态机主要分支由自动测试覆盖；构建产物安全测试仍证明无 Cookie/宽泛 host 权限/已知写操作；日志和 Git 扫描不包含真实密钥、简历或 Chrome 数据；干净克隆能按 README 加载。
-
-### P1：猎聘适配与 MV3 恢复可靠性
-
-- 用脱敏 fixture 扩充猎聘列表/详情 DOM 变体；将脆弱选择器集中管理并提供明确错误分类。
-- 处理 SPA 导航、懒加载、登录墙/验证码/风控页面和手动关闭详情标签页。
-- 将运行唤醒/超时从仅内存 `setTimeout` 迁移为适合 MV3 的可恢复机制，定义重启后的幂等行为。
-- 提供可查看/导出/清理的模拟台账 UI，明确区分 simulated、review、failed、filtered。
-
-**验收：** 在预先保存的脱敏 DOM fixture 上稳定提取；worker 被回收或浏览器重启后不重复处理、不误记成功并可继续/安全终止；人工小批量 3–5 个职位逐项核对字段、标签关闭和台账证据一致；仍无站点写操作。
-
-### P2：配置、隐私与可移植性
-
-- 将模型 origin 权限改为明确、可审查的配置流程，或设计 Chrome 可选 host 权限；禁止宽泛通配。
-- 增加连接测试与可理解的 endpoint/CORS/权限错误提示。
-- 支持画像查看、重新生成、删除和导出；明确清除设置/队列/台账的操作。
-- 移除或文档化环境特定默认 endpoint；补充数据发送预览和隐私提示。
-
-**验收：** 新模型 origin 的添加步骤有自动测试和人工加载验证；错误能区分网络、host permission、认证、模型兼容和输出格式；用户可确认并删除本地画像/Key/台账；仓库默认值与示例不含凭证。
-
-### P3：第二站点 dry-run 适配
-
-- 先定义通用 platform adapter 接口，再选择一个站点实现列表/详情提取；不要复制猎聘编排逻辑。
-- 每个站点使用最小 host 权限、合成/脱敏 fixture 和独立安全测试。
-
-**验收：** 新站点仅 dry-run；扫描、二次筛选、模型评估和本地台账可用；安全测试证明无站点写操作；猎聘现有 9 个测试及新增回归全部通过。
-
-### P4：live 模式（必须单独立项与人工批准）
-
-只有 dry-run 结果经过用户验收、平台规则/合规风险评估完成后才能设计。应优先提供“人工复制招呼语”而不是自动发送。
-
-**最低验收门槛：** 每批单独输入确认短语；发送前逐条人工预览；速率与批量上限；页面回读成功才写 `sent`；失败可重试且幂等；立即停止；审计证据；不读取/导出 Cookie；专门的安全测试和人工演练。未满足全部条件不得发布 live。
-
-## 11. Agent 交付约定
-
-先阅读 [`AGENTS.md`](AGENTS.md)。每次改动保持小范围、使用合成测试数据、同步构建 `dist/`，提交前运行：
-
-```bash
 npm run verify
+~~~
+
+npm run verify 会执行 TypeScript 类型检查、重建 dist，并运行 Vitest。它不会启动 Supabase。
+
+可用命令：
+
+~~~bash
+npm run typecheck
+npm run build
+npm test
+npm run verify
+npm run test:db
+npm run test:edge
+npm run verify:full
+npm run smoke:extension
+~~~
+
+## 本地 Supabase
+
+启动并重放数据库：
+
+~~~bash
+supabase start
+supabase db reset
+supabase test db
+~~~
+
+启动 Edge Function：
+
+~~~bash
+supabase functions serve model-gateway
+~~~
+
+Supabase CLI 会输出本地 API URL 和 PUBLISHABLE_KEY。不要把本地 SECRET_KEY、SERVICE_ROLE_KEY、JWT secret 或任何远程项目密钥写入源码、README、命令脚本、测试或 Git。
+
+在另一个终端用公开本地配置构建扩展：
+
+~~~bash
+JOBFLOW_SUPABASE_URL=http://127.0.0.1:54321 \
+JOBFLOW_SUPABASE_PUBLISHABLE_KEY=<supabase status 输出的 PUBLISHABLE_KEY> \
+npm run build
+~~~
+
+运行合成 Edge 集成测试：
+
+~~~bash
+JOBFLOW_SUPABASE_URL=http://127.0.0.1:54321 \
+JOBFLOW_SUPABASE_PUBLISHABLE_KEY=<本地 PUBLISHABLE_KEY> \
+npm run test:edge
+~~~
+
+该脚本拒绝任何非 http://127.0.0.1:54321 地址，不能误操作远程项目。
+
+### 托管模型
+
+本地 Edge Function 可通过未跟踪的环境文件或部署 secrets 配置：
+
+~~~text
+MANAGED_MODEL_ENDPOINT
+MANAGED_MODEL_PROVIDER
+MANAGED_MODEL_NAME
+MANAGED_MODEL_API_KEY
+~~~
+
+托管模型只对 private.user_entitlements 中明确启用且具有额度的账号开放。当前仓库不包含托管模型 Key，也没有默认 VIP 用户。
+
+## 构建配置和 host 权限
+
+构建变量：
+
+~~~text
+JOBFLOW_SUPABASE_URL
+JOBFLOW_SUPABASE_PUBLISHABLE_KEY
+~~~
+
+它们都是浏览器端公开配置，不能使用 Supabase secret/service-role key。
+
+未设置 JOBFLOW_SUPABASE_URL 时，dist 只包含：
+
+~~~text
+https://*.liepin.com/*
+~~~
+
+设置后，构建脚本只追加该 URL 的精确 origin。npm test 和 npm run verify 会重新执行默认构建，因此会覆盖之前含本地或远程 Supabase 配置的 dist；Chrome 调试前需要按目标环境重新构建。
+
+## Chrome 加载
+
+1. 按目标 Supabase 环境运行 npm run build；
+2. 打开 chrome://extensions；
+3. 开启开发者模式；
+4. 选择“加载已解压的扩展程序”；
+5. 选择仓库中的 dist 目录；
+6. 打开扩展管理页注册或登录；
+7. 配置并测试模型；
+8. 导入合成或自己的简历并审核画像；
+9. 配置 JD 规则；
+10. 打开猎聘职位列表页并刷新；
+11. 点击页面右侧 JobFlow 图标打开 side panel。
+
+修改源码后的刷新顺序：
+
+~~~text
+npm run build
+→ chrome://extensions Reload
+→ 刷新已打开的猎聘页面
+~~~
+
+只刷新网页不会更新 service worker；只 Reload 扩展不会替换已注入旧 content script 的页面。
+
+## 使用流程
+
+1. 注册并登录；
+2. 选择 VIP 托管模型或配置 BYOK；
+3. 用合成文本完成连接测试；
+4. 导入简历并检查本地原件状态；
+5. 审核事实，至少确认一条后启用画像；
+6. 在猎聘使用原生筛选器；
+7. 打开 side panel，点击扫描；
+8. 检查观察、新职位、重复、排除和已有草稿计数；
+9. 调整本批 1 到 20 条并点击开始生成；
+10. 在 side panel 查看进度；
+11. 在管理页处理复核、查看排除依据、编辑或重新生成草稿；
+12. 必要时对排除记录选择“作为例外继续”。
+
+扫描和草稿生成均不表示已经向招聘方发送或投递。
+
+## 调试入口
+
+- Service worker：chrome://extensions → JobFlow → Service Worker；
+- content script：猎聘页面 DevTools，切换到扩展执行上下文；
+- side panel：在侧边栏内打开 DevTools；
+- 管理页：打开扩展管理页后打开 DevTools；
+- 本地数据：Application → Extension Storage 和 IndexedDB；
+- Supabase：本地 Studio 默认由 supabase start 提供；
+- Edge runtime：运行 supabase functions serve 的终端。
+
+日志只能包含请求 ID、操作、路由、供应商/模型、耗时、计费单位、schema 结果和脱敏错误类别。
+
+## 自动 Chrome smoke
+
+先启动本地 Supabase 和 model-gateway，再用本地公开配置构建 dist，然后运行：
+
+~~~bash
+npm run smoke:extension
+~~~
+
+脚本使用临时 Chrome profile，创建合成未验证账号，检查管理台、窄管理窗口、side panel 和猎聘入口。扩展页面截图写入被 Git 忽略的 .artifacts；不保存猎聘页面截图。临时 Chrome profile 在结束后删除。
+
+## 当前限制与后续
+
+当前未实现：
+
+- 真实投递和招呼语发送；
+- 单条或批量 reviewed_send；
+- automatic_send；
+- 自动翻页、滚动和页面打开后自动执行；
+- 招聘会话读取与回复；
+- HR 明确拒绝判断；
+- 邮箱、手机、微信等站外联系方式交换判断；
+- 每个平台的真实发送证据；
+- 每日投递额度扣减和 live 速率限制；
+- BOSS 直聘等其他平台；
+- 邮箱验证、密码找回、支付和订阅；
+- OCR 和模型供应商原生协议。
+
+未来猎聘真实投递默认每日值暂定 150，允许用户调高或调低，按 Asia/Shanghai 自然日统计。这个值是产品设置，不是猎聘官方允许量。所有 live 行为必须单独立项、评审并人工验收，不能通过当前设置字段解锁。
+
+## 远程 Supabase
+
+本仓库没有连接、迁移或部署任何远程 Supabase 项目。远程操作会改变外部状态，必须先明确目标项目并单独执行：
+
+~~~text
+supabase login
+supabase link
+supabase db push
+supabase functions deploy
+supabase secrets set
+~~~
+
+生产发布前至少还需要：
+
+- 配置准确的远程 project origin；
+- 审查所有 migration 与 RLS；
+- 配置托管模型 secrets；
+- 设置真实 VIP 权益和额度；
+- 决定 Supabase Free 暂停与升级策略；
+- 处理自定义 Endpoint 的 DNS rebinding 剩余风险；
+- 完成 Chrome 小批量只读人工验收；
+- 运行 secrets、个人资料和 dist 一致性扫描。
+
+## 交付检查
+
+~~~bash
+npm ci
+npm run verify
+supabase db reset
+supabase test db
+npm audit
 git diff --check
 git status --short
 git diff -- . ':!package-lock.json'
-```
+~~~
 
-然后检查已跟踪文件是否出现高熵 token、私钥、Authorization 字面量、真实简历/Chrome 数据。不要创建远程仓库或推送，除非用户明确要求。
+不要提交真实 API Key、简历、画像、Chrome profile/storage、Cookie、抓取页面、远程 Supabase secrets 或包含个人信息的日志。

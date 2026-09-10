@@ -11,6 +11,14 @@ export function isLiepinDetailPage(location: Location = window.location): boolea
   return /(^|\.)liepin\.com$/.test(location.hostname) && /\/(?:job|a)\/\d+\.shtml/i.test(location.pathname);
 }
 
+export function detectLiepinBlockedPage(root: ParentNode = document): "login_required" | "risk_control" | null {
+  const source = root instanceof Document ? root.body?.textContent : root.textContent;
+  const value = (source || "").replace(/\s+/g, " ").slice(0, 20_000);
+  if (/安全验证|拖动滑块|访问异常|操作频繁|验证码|风险验证/.test(value)) return "risk_control";
+  if (/登录后查看|请先登录|扫码登录|密码登录/.test(value)) return "login_required";
+  return null;
+}
+
 function jobIdFromUrl(url: string): string {
   return url.match(/\/(?:job|a)\/(\d+)\.shtml/i)?.[1] || "";
 }
@@ -57,7 +65,11 @@ export function scanLiepinList(root: ParentNode = document): ListCandidate[] {
     const company = [...card.querySelectorAll<HTMLElement>('[data-nick="job-detail-company-info"] span')].map((node) => (node.innerText || node.textContent || "").trim()).find(Boolean) || companyArea.split(/\s+/)[0] || "";
     const canonicalUrl = canonicalJobUrl(anchor.href);
     seen.add(jobId);
-    candidates.push({ platform: "liepin", jobId, url: anchor.href, canonicalUrl, title, company, location, salary, experience, education, cardText: `${card.innerText || card.textContent || ""} ${recruiter}`.replace(/\s+/g, " ").trim(), index: candidates.length });
+    const cardText = ((card.innerText || card.textContent || "") + " " + recruiter)
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 6000);
+    candidates.push({ platform: "liepin", jobId, url: anchor.href, canonicalUrl, title, company, location, salary, experience, education, cardText, index: candidates.length });
   }
   return candidates;
 }
@@ -82,7 +94,7 @@ export function extractLiepinDetail(root: ParentNode = document, href = location
     location: locationText, salary,
     experience: propertyText.match(/经验不限|应届|实习|\d+年以上|\d+-\d+年/)?.[0] || "",
     education: propertyText.match(/统招本科|本科|硕士|博士|大专|学历不限/)?.[0] || "",
-    cardText: bodyText.slice(0, 1500), index: -1, description,
+    cardText: bodyText.slice(0, 1500), index: -1, description: description.slice(0, 60_000),
     recruiter,
     recruiterTitle: text(root, ".recruiter-info .title") || text(root, ".recruiter-card .position") || text(root, ".hunter-info .title") || recruiterCareer.split(/[·]/)[0]?.trim() || ""
   };

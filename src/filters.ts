@@ -1,78 +1,189 @@
-import type { DetailJob, FilterDecision, FilterSettings, ListCandidate } from "./types";
+import { TECHNOLOGY_CATALOG } from "./defaults";
+import type {
+  DetailJob,
+  FilterDecision,
+  JdRuleSettings,
+  ListCandidate,
+  RuleDecision,
+  RuleEvidence,
+  RuleOutcome
+} from "./types";
 
-const compact = (value: string) => value.toLowerCase().replace(/\s+/g, " ");
-const hits = (text: string, words: string[]) => words.filter((word) => word.trim() && text.includes(word.trim().toLowerCase()));
+const RULE_VERSION = 1;
+const NEGATIONS = ["无需", "不需要", "无须", "不要求", "不涉及", "没有"];
+const PREFERENCES = ["优先", "加分", "更佳", "可选", "非必需", "了解即可", "熟悉即可"];
+const MANDATORY = ["必须", "要求", "仅限", "需要", "需具备", "能够接受", "能接受", "精通", "熟练掌握"];
 
-export function parseSalaryMaxK(salary: string): number | null {
-  const text = salary.toLowerCase().replace(/,/g, "");
-  const range = text.match(/(\d+(?:\.\d+)?)\s*[-~至]\s*(\d+(?:\.\d+)?)\s*k/);
-  if (range) return Number(range[2]);
-  const single = text.match(/(\d+(?:\.\d+)?)\s*k/);
-  if (single) return Number(single[1]);
-  const yearly = text.match(/(\d+(?:\.\d+)?)\s*[-~至]\s*(\d+(?:\.\d+)?)\s*万/);
-  if (yearly) return Math.round(Number(yearly[2]) / 12 * 10) / 10;
-  return null;
+interface Segment {
+  text: string;
+  normalized: string;
+  start: number;
+  end: number;
 }
 
-export function evaluateRules(job: ListCandidate | DetailJob, settings: FilterSettings, detail = false): FilterDecision {
-  const title = compact(job.title);
-  const body = compact(`${job.title} ${job.cardText} ${detail && "description" in job ? job.description : ""}`);
-  const reasons: string[] = [];
-  const matchedDirections: string[] = [];
-
-  if (settings.cityKeywords.length && !hits(compact(`${job.location} ${job.cardText}`), settings.cityKeywords.map((x) => x.toLowerCase())).length) {
-    return { decision: "skip", reasons: ["地点不符合限定"], matchedDirections };
+function splitSegments(value: string): Segment[] {
+  const output: Segment[] = [];
+  for (const match of value.matchAll(/[^。！？!?；;\n]+/g)) {
+    const text = match[0].trim();
+    if (!text) continue;
+    const start = (match.index ?? 0) + Math.max(0, match[0].indexOf(text));
+    output.push({
+      text,
+      normalized: text.toLowerCase().replace(/\s+/g, " "),
+      start,
+      end: start + text.length
+    });
   }
+  return output;
+}
 
-  const salaryMax = parseSalaryMaxK(job.salary);
-  if (settings.minSalaryK > 0 && salaryMax !== null && salaryMax < settings.minSalaryK) {
-    return { decision: "skip", reasons: [`薪资上限 ${salaryMax}K 低于 ${settings.minSalaryK}K`], matchedDirections };
+function includesAny(value: string, terms: readonly string[]): boolean {
+  return terms.some((term) => value.includes(term.toLowerCase()));
+}
+
+function findSegments(source: Segment[], terms: readonly string[]): Segment[] {
+  return source.filter((segment) => includesAny(segment.normalized, terms));
+}
+
+function isNegated(segment: Segment): boolean {
+  return includesAny(segment.normalized, NEGATIONS);
+}
+
+function isPreferred(segment: Segment): boolean {
+  return includesAny(segment.normalized, PREFERENCES);
+}
+
+function isMandatory(segment: Segment): boolean {
+  return includesAny(segment.normalized, MANDATORY);
+}
+
+function toEvidence(segment: Segment): RuleEvidence {
+  return { text: segment.text.slice(0, 220), start: segment.start, end: segment.end };
+}
+
+function makeDecision(
+  ruleId: string,
+  outcome: RuleOutcome,
+  reason: string,
+  matched: Segment[]
+): RuleDecision {
+  return {
+    ruleId,
+    ruleVersion: RULE_VERSION,
+    outcome,
+    reason,
+    evidence: matched.slice(0, 3).map(toEvidence)
+  };
+}
+
+function schoolDecision(source: Segment[], settings: JdRuleSettings): RuleDecision | null {
+  if (settings.schoolPedigree === "disabled") return null;
+  const matched = findSegments(source, ["985", "211", "双一流", "重点院校", "名校"]).filter(
+    (segment) => !isNegated(segment)
+  );
+  if (!matched.length) return null;
+  if (matched.some(isPreferred)) {
+    return makeDecision("school_pedigree", "review", "学校背景仅为偏好或表达不明确", matched);
   }
+  if (matched.some(isMandatory)) {
+    return makeDecision("school_pedigree", "exclude", "职位明确要求特定学校背景", matched);
+  }
+  return makeDecision("school_pedigree", "review", "发现学校背景表述，需确认是否为硬性要求", matched);
+}
 
-  const required = settings.directions.filter((rule) => rule.mode === "require");
-  const requiredMatches = required.map((rule) => ({ rule, found: hits(body, rule.keywords.map((x) => x.toLowerCase())) })).filter((x) => x.found.length);
-  if (required.length) {
-    const ok = settings.requiredDirectionMatch === "all" ? requiredMatches.length === required.length : requiredMatches.length > 0;
-    if (!ok) {
-      const reason = settings.requiredDirectionMatch === "all" ? "未匹配全部必选方向" : "未匹配任一必选方向";
-      if (detail) return { decision: "skip", reasons: [reason], matchedDirections };
-      reasons.push(`${reason}，待详情复核`);
+function travelDecision(source: Segment[], settings: JdRuleSettings): RuleDecision | null {
+  if (settings.travel === "disabled" || settings.travel === "unrestricted") return null;
+  const matched = findSegments(source, ["出差", "驻点", "外派", "异地调动"]).filter(
+    (segment) => !isNegated(segment)
+  );
+  if (!matched.length) return null;
+  const frequent = matched.filter((segment) =>
+    includesAny(segment.normalized, ["长期", "高频", "频繁", "经常", "常驻", "驻点", "外派", "异地调动"])
+  );
+  const occasional = matched.filter((segment) =>
+    includesAny(segment.normalized, ["偶尔", "偶发", "短期", "低频", "少量"])
+  );
+  if (settings.travel === "occasional") {
+    if (frequent.length) {
+      return makeDecision("travel_mobility", "exclude", "职位要求高频、长期或异地流动", frequent);
     }
+    if (occasional.length === matched.length) return null;
+    return makeDecision("travel_mobility", "review", "职位要求出差但频率或范围不明确", matched);
   }
+  if (frequent.length || occasional.length === matched.length || matched.some(isMandatory)) {
+    return makeDecision("travel_mobility", "exclude", "职位包含明确出差或流动要求", matched);
+  }
+  return makeDecision("travel_mobility", "review", "发现出差或流动表述，需人工确认", matched);
+}
 
-  for (const rule of settings.directions) {
-    const found = hits(body, rule.keywords.map((x) => x.toLowerCase()));
-    if (!found.length) continue;
-    matchedDirections.push(rule.label);
-    if (rule.mode === "exclude") return { decision: "skip", reasons: [`命中排除方向：${rule.label}（${found.join("、")}）`], matchedDirections };
-    if (rule.mode === "review") reasons.push(`命中复核方向：${rule.label}`);
-    if (rule.mode === "prefer") reasons.push(`命中偏好方向：${rule.label}`);
+function booleanDecision(
+  source: Segment[],
+  enabled: boolean,
+  ruleId: string,
+  terms: readonly string[],
+  reason: string
+): RuleDecision | null {
+  if (!enabled) return null;
+  const matched = findSegments(source, terms).filter((segment) => !isNegated(segment));
+  if (!matched.length) return null;
+  if (matched.some(isPreferred) && !matched.some(isMandatory)) {
+    return makeDecision(ruleId, "review", reason + "，但表达可能是可选或偏好", matched);
   }
+  return makeDecision(ruleId, "exclude", reason, matched);
+}
 
-  const customExclude = hits(body, settings.customExcludeAny.map((x) => x.toLowerCase()));
-  if (customExclude.length) return { decision: "skip", reasons: [`命中自定义排除词：${customExclude.join("、")}`], matchedDirections };
-  if (settings.customIncludeAny.length && !hits(body, settings.customIncludeAny.map((x) => x.toLowerCase())).length) {
-    if (detail) return { decision: "skip", reasons: ["未命中自定义任一包含词"], matchedDirections };
-    reasons.push("自定义任一包含词待详情复核");
-  }
-  const missingAll = settings.customIncludeAll.filter((word) => !body.includes(word.toLowerCase()));
-  if (missingAll.length) {
-    if (detail) return { decision: "skip", reasons: [`缺少自定义必含词：${missingAll.join("、")}`], matchedDirections };
-    reasons.push(`自定义必含词待详情复核：${missingAll.join("、")}`);
-  }
+function technologyDecisions(
+  job: DetailJob,
+  source: Segment[],
+  settings: JdRuleSettings
+): RuleDecision[] {
+  const title = job.title.toLowerCase();
+  return settings.rejectedPrimaryTechnologies.flatMap((technologyId) => {
+    const technology = TECHNOLOGY_CATALOG.find((item) => item.id === technologyId);
+    if (!technology) return [];
+    const titleMatch = includesAny(title, technology.aliases);
+    const matched = findSegments(source, technology.aliases).filter((segment) => !isNegated(segment));
+    if (!titleMatch && !matched.length) return [];
+    const incidental = matched.every((segment) =>
+      isPreferred(segment) ||
+      includesAny(segment.normalized, ["对接", "迁移", "替换", "非必需", "了解即可", "熟悉即可"])
+    );
+    if (!titleMatch && incidental) return [];
+    const core = titleMatch || matched.some((segment) =>
+      isMandatory(segment) || includesAny(segment.normalized, ["核心", "主要", "负责", "开发", "架构", "主导"])
+    );
+    return [makeDecision(
+      "primary_technology:" + technology.id,
+      core ? "exclude" : "review",
+      core
+        ? technology.label + " 是职位核心或必需技术"
+        : "职位提及 " + technology.label + "，但无法确认是否为核心要求",
+      matched
+    )];
+  });
+}
 
-  const schoolHits = hits(body, settings.schoolRestrictionKeywords.map((x) => x.toLowerCase()));
-  if (settings.schoolRestrictionMode === "include_only" && !schoolHits.length) {
-    if (detail) return { decision: "skip", reasons: ["未命中985/211等学校限定"], matchedDirections };
-    reasons.push("985/211等学校限定待详情复核");
-  }
-  if (schoolHits.length && settings.schoolRestrictionMode === "exclude") return { decision: "skip", reasons: [`命中学校限制：${schoolHits.join("、")}`], matchedDirections };
-  if (schoolHits.length && settings.schoolRestrictionMode === "review") reasons.push(`学校限制需复核：${schoolHits.join("、")}`);
-
-  const reviewHits = hits(body, settings.customReviewAny.map((x) => x.toLowerCase()));
-  if (reviewHits.length) reasons.push(`命中自定义复核词：${reviewHits.join("、")}`);
-  const isReview = reasons.some((reason) => reason.includes("复核") || reason.includes("限制"));
-  return { decision: isReview ? "review" : "pass", reasons: reasons.length ? reasons : [detail ? "详情硬规则通过" : "列表硬规则通过"], matchedDirections };
+export function evaluateRules(job: DetailJob, settings: JdRuleSettings): FilterDecision {
+  const source = splitSegments(job.title + "\n" + job.description);
+  const decisions: RuleDecision[] = [
+    schoolDecision(source, settings),
+    travelDecision(source, settings),
+    booleanDecision(source, settings.rejectOutsourcing, "engagement:outsourcing", ["外包"], "职位明确为外包用工"),
+    booleanDecision(source, settings.rejectDispatch, "engagement:dispatch", ["派遣", "劳务派遣"], "职位明确为派遣用工"),
+    booleanDecision(source, settings.rejectLongTermClientSite, "engagement:client_site", ["驻场开发", "乙方驻场", "客户现场", "长期驻场"], "职位明确要求长期客户现场工作"),
+    booleanDecision(source, settings.rejectNightShift, "schedule:night_shift", ["夜班"], "职位明确要求夜班"),
+    booleanDecision(source, settings.rejectRotatingShift, "schedule:rotating_shift", ["倒班", "轮班"], "职位明确要求倒班或轮班"),
+    booleanDecision(source, settings.rejectBigSmallWeek, "schedule:big_small_week", ["大小周"], "职位明确要求大小周"),
+    booleanDecision(source, settings.rejectSingleRestDay, "schedule:single_rest_day", ["单休"], "职位明确要求单休"),
+    booleanDecision(source, settings.rejectLongTermOnCall, "schedule:long_term_on_call", ["长期 on-call", "长期on-call", "长期值班", "长期待命"], "职位明确要求长期 on-call")
+  ].filter((item): item is RuleDecision => item !== null);
+  decisions.push(...technologyDecisions(job, source, settings));
+  const outcome: RuleOutcome = decisions.some((item) => item.outcome === "exclude")
+    ? "exclude"
+    : decisions.some((item) => item.outcome === "review")
+      ? "review"
+      : "pass";
+  return { outcome, decisions };
 }
 
 export function canonicalJobUrl(rawUrl: string): string {
@@ -82,6 +193,6 @@ export function canonicalJobUrl(rawUrl: string): string {
   return url.toString();
 }
 
-export function jobKey(job: Pick<ListCandidate, "platform" | "jobId" | "canonicalUrl">): string {
-  return `${job.platform}:${job.jobId || job.canonicalUrl}`;
+export function jobKey(job: Pick<ListCandidate, "platform" | "jobId">): string {
+  return job.platform + ":" + job.jobId;
 }

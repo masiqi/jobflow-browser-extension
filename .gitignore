@@ -2,3 +2,9 @@ node_modules/
 .DS_Store
 *.log
 coverage/
+.env
+.env.*
+!.env.example
+supabase/.branches/
+supabase/.temp/
+.artifacts/
