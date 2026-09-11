@@ -1,0 +1,25 @@
+# Implementation Plan
+
+- [x] Add a regression proving `extractLiepinDetail` returns a runtime-valid `DetailJob`.
+- [x] Add a content acknowledgement regression for rejected `DETAIL_READY` messages.
+- [x] Add pgTAP coverage for owner success, cross-user rejection, identity validation, input validation, redacted event payload, and request idempotency.
+- [x] Add an options UI regression for persisted JD and recruiter rendering.
+- [x] Fix the detail index and explicit acknowledgement failure path.
+- [x] Add the `record_job_details` migration and Supabase client adapter.
+- [x] Persist details before profile/rule/model processing and preserve the detail timeout boundary.
+- [x] Render stored detail data in the record center.
+- [x] Update cross-layer contracts and debugging retrospective.
+- [x] Add pure Edge diagnostic sanitization tests with hostile values and field names.
+- [x] Add browser diagnostic parsing/formatting tests and Service Worker Console assertions.
+- [x] Return stage-specific safe diagnostics for model output schema failures without returning raw output.
+- [x] Render compact diagnostics in failure reasons and log the validated safe object in the Service Worker Console.
+- [x] Run focused tests, `npm run verify`, database tests/lint, Edge integration, Chrome smoke, audit, secret scan, and diff checks.
+- [x] Add prompt regressions for the suitability array cardinalities and reproduce `factIds:too_big` as the pre-fix contract gap.
+- [x] Add prompt regressions for exact JD evidence excerpts after the stored replay exposes grounding failure.
+- [x] Add prompt regressions for the Edge outcome enum and greeting array bounds after the second stored replay exposes `outcome:invalid_value`.
+- [x] Add strict runtime-command and record-center UI regressions for stored-detail retry.
+- [x] Extract a shared post-detail processing path and make both batch capture and stored retry use it.
+- [x] Add the stored-detail retry command, validation/precondition failures, redacted failure persistence, and management-page progress feedback.
+- [x] Prove stored retry consumes `OpportunityRecord.description` without calling `chrome.tabs.create`.
+- [x] Run focused tests and the full project/database/Edge/Chrome safety gates.
+- [x] Rebuild the local `.env.local` extension, reload Chrome, and use the stored JD plus current owner-bound BYOK to obtain a valid evaluation and greeting draft without opening Liepin.
