@@ -12,6 +12,15 @@ import type {
 } from "./types";
 
 type ViewName = "records" | "resume" | "rules" | "model" | "account";
+type ResumeImportFeedback = {
+  kind: "idle" | "progress" | "success" | "error";
+  message: string;
+};
+type StoredRetryFeedback = {
+  opportunityId: string;
+  kind: "idle" | "progress" | "success" | "error";
+  message: string;
+};
 
 const appElement = document.querySelector<HTMLDivElement>("#app");
 if (!appElement) throw new Error("管理台根节点不存在");
@@ -21,6 +30,10 @@ let currentView: ViewName = "records";
 let selectedOpportunityId = "";
 let recordFilter = "all";
 let recordSearch = "";
+let resumeImportBusy = false;
+let resumeImportFeedback: ResumeImportFeedback = { kind: "idle", message: "" };
+let storedRetryBusyOpportunityId = "";
+let storedRetryFeedback: StoredRetryFeedback = { opportunityId: "", kind: "idle", message: "" };
 
 const STATUS_LABELS: Record<string, string> = {
   discovered: "待处理",
@@ -76,6 +89,9 @@ function accountView(state: AppState): string {
 function resumeView(state: AppState): string {
   if (state.auth.status !== "signed_in") return '<div class="empty-state">登录后管理简历画像。</div>';
   const profile = state.resumeProfile;
+  const allFactsApproved = profile
+    ? profile.facts.length > 0 && profile.facts.every((fact) => fact.approved)
+    : false;
   const profileMarkup = profile ? [
     '<div class="profile-status"><span class="badge ' + escapeHtml(profile.state) + '">' + escapeHtml(profile.state)
       + '</span><b>' + escapeHtml(profile.sourceName) + '</b><small>版本 ' + profile.version + " · 本地原件 "
@@ -88,7 +104,12 @@ function resumeView(state: AppState): string {
       + '" ' + (profile.state === "draft" ? "" : "disabled") + '></label></div>',
     '<label>明确限制<textarea id="profileConstraints" ' + (profile.state === "draft" ? "" : "disabled") + '>'
       + escapeHtml(profile.constraints.join("\n")) + '</textarea></label>',
-    '<h3>可引用事实</h3><div class="fact-list">',
+    '<div class="fact-list-heading"><h3>可引用事实</h3>',
+    profile.state === "draft"
+      ? '<label class="check"><input id="approveAllFacts" type="checkbox" '
+        + (allFactsApproved ? "checked" : "") + '><span>全部允许引用</span></label>'
+      : "",
+    '</div><div class="fact-list">',
     profile.facts.map((fact) =>
       '<div class="fact"><label class="check"><input type="checkbox" data-fact-approved="' + escapeHtml(fact.id)
       + '" ' + (fact.approved ? "checked" : "") + " " + (profile.state === "draft" ? "" : "disabled")
@@ -107,9 +128,15 @@ function resumeView(state: AppState): string {
     '<div class="page-heading"><h2>简历画像</h2><p>原始文件只保存在当前 Chrome profile，云端仅保存结构化画像。</p></div>',
     '<p class="route-disclosure">本次模型路径：' + escapeHtml(state.settings.model.route.toUpperCase()) + " · "
       + escapeHtml(state.settings.model.provider) + " / " + escapeHtml(state.settings.model.model) + "</p>",
-    '<div class="import-band"><label>选择文件<input id="resumeFile" type="file" accept=".pdf,.docx,.txt,.md,.markdown"></label>',
-    '<span>或</span><label class="paste">粘贴简历文本<textarea id="pastedResume" placeholder="粘贴纯文本简历"></textarea></label>',
-    '<button class="primary" data-action="import-resume">解析并生成画像</button></div>',
+    '<div class="import-band" aria-busy="' + String(resumeImportBusy) + '"><label>选择文件<input id="resumeFile" type="file" '
+      + (resumeImportBusy ? "disabled " : "") + 'accept=".pdf,.docx,.txt,.md,.markdown"></label>',
+    '<span>或</span><label class="paste">粘贴简历文本<textarea id="pastedResume" '
+      + (resumeImportBusy ? "disabled " : "") + 'placeholder="粘贴纯文本简历"></textarea></label>',
+    '<button class="primary import-button" data-action="import-resume" data-busy="' + String(resumeImportBusy) + '" '
+      + (resumeImportBusy ? "disabled" : "") + '>' + escapeHtml(resumeImportBusy ? resumeImportFeedback.message : "解析并生成画像")
+      + '</button></div>',
+    '<div id="resumeImportStatus" class="import-status ' + escapeHtml(resumeImportFeedback.kind)
+      + '" role="status" aria-live="polite">' + escapeHtml(resumeImportFeedback.message) + "</div>",
     profileMarkup
   ].join("");
 }
@@ -222,6 +249,9 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
   const ruleEvidence = projectRuleEvidence(events);
   const draft = state.drafts.find((item) => item.opportunityId === record.id);
   const canOverride = ["deterministic_excluded", "model_excluded", "user_excluded"].includes(record.status);
+  const canRetryStored = record.status === "failed" && Boolean(record.description?.trim());
+  const retryBusy = Boolean(storedRetryBusyOpportunityId);
+  const retryFeedback = storedRetryFeedback.opportunityId === record.id ? storedRetryFeedback : null;
   return [
     '<div class="detail-heading"><div><span class="badge ' + escapeHtml(record.status) + '">'
       + escapeHtml(STATUS_LABELS[record.status] || record.status) + '</span><h3>' + escapeHtml(record.title)
@@ -229,10 +259,29 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
       + escapeHtml(record.salary) + '</p></div><button data-action="open-job" data-url="' + escapeHtml(record.canonicalUrl)
       + '">打开职位</button></div>',
     record.latestReason ? '<div class="reason"><b>当前原因</b><p>' + escapeHtml(record.latestReason) + "</p></div>" : "",
+    canRetryStored || retryFeedback
+      ? '<div class="stored-retry" aria-busy="' + String(retryBusy) + '">'
+        + (canRetryStored
+          ? '<button class="primary" type="button" data-action="retry-stored-opportunity" data-id="'
+            + escapeHtml(record.id) + '" ' + (retryBusy ? "disabled" : "") + '>'
+            + (retryBusy ? "正在重试" : "使用已保存详情重试") + "</button>"
+          : "")
+        + '<p id="storedRetryStatus" class="stored-retry-status ' + escapeHtml(retryFeedback?.kind ?? "idle")
+        + '" role="status" aria-live="polite" aria-atomic="true">'
+        + escapeHtml(retryFeedback?.message ?? "") + "</p></div>"
+      : "",
     ruleEvidence.length ? '<div class="detail-section"><h4>JD 规则证据</h4>'
       + ruleEvidence.map((item) => '<div class="evidence-item"><b>' + escapeHtml(item.ruleId)
         + '</b><p>' + escapeHtml(item.reason) + '</p><blockquote>' + escapeHtml(item.evidence.join("\n"))
         + "</blockquote></div>").join("") + "</div>" : "",
+    record.description ? '<div class="detail-section"><h4>已保存职位详情</h4>'
+      + (record.recruiter || record.recruiterTitle
+        ? '<p class="recruiter-metadata"><b>招聘方</b> ' + escapeHtml(record.recruiter || "未提供")
+          + (record.recruiterTitle ? " · " + escapeHtml(record.recruiterTitle) : "") + "</p>"
+        : "")
+      + '<div class="job-description">' + escapeHtml(record.description) + "</div>"
+      + (record.jdHash ? '<small class="detail-hash">JD SHA-256：' + escapeHtml(record.jdHash) + "</small>" : "")
+      + "</div>" : "",
     evaluation ? '<div class="detail-section"><h4>模型评估</h4><p>' + escapeHtml(evaluation.reasons.join("；"))
       + '</p><small>' + escapeHtml(evaluation.model.provider) + " / " + escapeHtml(evaluation.model.model)
       + '</small><blockquote>' + escapeHtml(evaluation.jdEvidence.join("\n")) + "</blockquote>"
@@ -395,12 +444,34 @@ function bindActions(state: AppState): void {
       if (model) model.value = preset.defaultModel;
     }
   });
+  const factApprovals = [...document.querySelectorAll<HTMLInputElement>("[data-fact-approved]")];
+  const approveAllFacts = document.querySelector<HTMLInputElement>("#approveAllFacts");
+  const syncFactApprovalMaster = () => {
+    if (!approveAllFacts) return;
+    const approvedCount = factApprovals.filter((input) => input.checked).length;
+    approveAllFacts.checked = factApprovals.length > 0 && approvedCount === factApprovals.length;
+    approveAllFacts.indeterminate = approvedCount > 0 && approvedCount < factApprovals.length;
+  };
+  approveAllFacts?.addEventListener("change", () => {
+    for (const input of factApprovals) input.checked = approveAllFacts.checked;
+    syncFactApprovalMaster();
+  });
+  for (const input of factApprovals) input.addEventListener("change", syncFactApprovalMaster);
+  syncFactApprovalMaster();
   document.querySelectorAll<HTMLElement>("[data-action]").forEach((button) => {
     button.addEventListener("click", () => void handleAction(button.dataset.action || "", button, state));
   });
 }
 
 async function handleAction(action: string, target: HTMLElement, state: AppState): Promise<void> {
+  if (action === "import-resume") {
+    await runResumeImport(state);
+    return;
+  }
+  if (action === "retry-stored-opportunity") {
+    await runStoredOpportunityRetry(target.dataset.id || "");
+    return;
+  }
   try {
     if (action === "login" || action === "register") {
       await sendCommand({
@@ -429,8 +500,6 @@ async function handleAction(action: string, target: HTMLElement, state: AppState
       if (action === "test-model") await sendCommand({ type: "TEST_MODEL" });
     } else if (action === "clear-key") {
       await sendCommand({ type: "CLEAR_BYOK_KEY" });
-    } else if (action === "import-resume") {
-      await importResume(state);
     } else if (action === "save-profile" && state.resumeProfile) {
       await sendCommand({ type: "SAVE_PROFILE", profile: collectProfile(state.resumeProfile) });
     } else if (action === "activate-profile" && state.resumeProfile) {
@@ -470,12 +539,98 @@ async function handleAction(action: string, target: HTMLElement, state: AppState
   }
 }
 
+function updateStoredRetryFeedback(feedback: StoredRetryFeedback, busy: boolean): void {
+  storedRetryFeedback = feedback;
+  storedRetryBusyOpportunityId = busy ? feedback.opportunityId : "";
+  const panel = document.querySelector<HTMLElement>(".stored-retry");
+  const status = document.querySelector<HTMLElement>("#storedRetryStatus");
+  const button = document.querySelector<HTMLButtonElement>('[data-action="retry-stored-opportunity"]');
+  panel?.setAttribute("aria-busy", String(busy));
+  if (status) {
+    status.textContent = feedback.message;
+    status.className = "stored-retry-status " + feedback.kind;
+  }
+  if (button && button.dataset.id === feedback.opportunityId) {
+    button.disabled = busy;
+    button.textContent = busy ? "正在重试" : "使用已保存详情重试";
+  }
+}
+
+async function runStoredOpportunityRetry(opportunityId: string): Promise<void> {
+  if (!opportunityId || storedRetryBusyOpportunityId) return;
+  updateStoredRetryFeedback({
+    opportunityId,
+    kind: "progress",
+    message: "正在使用已保存的职位详情重试"
+  }, true);
+  try {
+    await sendCommand({ type: "RETRY_STORED_OPPORTUNITY", opportunityId });
+    storedRetryFeedback = {
+      opportunityId,
+      kind: "success",
+      message: "重试完成，职位处理记录已更新"
+    };
+    storedRetryBusyOpportunityId = "";
+    await render();
+  } catch (error) {
+    storedRetryFeedback = {
+      opportunityId,
+      kind: "error",
+      message: error instanceof Error ? error.message : String(error)
+    };
+    storedRetryBusyOpportunityId = "";
+    await render();
+  }
+}
+
+function updateResumeImportFeedback(feedback: ResumeImportFeedback, busy: boolean): void {
+  resumeImportFeedback = feedback;
+  resumeImportBusy = busy;
+  const band = document.querySelector<HTMLElement>(".import-band");
+  const status = document.querySelector<HTMLElement>("#resumeImportStatus");
+  const button = document.querySelector<HTMLButtonElement>('[data-action="import-resume"]');
+  const file = document.querySelector<HTMLInputElement>("#resumeFile");
+  const pasted = document.querySelector<HTMLTextAreaElement>("#pastedResume");
+  band?.setAttribute("aria-busy", String(busy));
+  if (status) {
+    status.textContent = feedback.message;
+    status.className = "import-status " + feedback.kind;
+  }
+  if (button) {
+    button.disabled = busy;
+    button.dataset.busy = String(busy);
+    button.textContent = busy ? feedback.message : "解析并生成画像";
+  }
+  if (file) file.disabled = busy;
+  if (pasted) pasted.disabled = busy;
+}
+
+async function runResumeImport(state: AppState): Promise<void> {
+  if (resumeImportBusy) return;
+  updateResumeImportFeedback({ kind: "progress", message: "正在读取简历" }, true);
+  try {
+    await importResume(state);
+    updateResumeImportFeedback({ kind: "progress", message: "正在加载画像" }, true);
+    await render();
+    updateResumeImportFeedback({
+      kind: "success",
+      message: "画像已生成，请审核并确认允许引用的事实"
+    }, false);
+    showToast("画像已生成");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    updateResumeImportFeedback({ kind: "error", message }, false);
+    showToast(message, true);
+  }
+}
+
 async function importResume(state: AppState): Promise<void> {
   if (state.auth.status !== "signed_in" || !state.auth.userId) throw new Error("请先登录");
   const file = document.querySelector<HTMLInputElement>("#resumeFile")?.files?.[0];
   const pasted = inputValue("pastedResume");
   if (!file && !pasted) throw new Error("请选择简历文件或粘贴文本");
   const parsed = file ? await readResumeFile(file) : readPastedResume(pasted);
+  updateResumeImportFeedback({ kind: "progress", message: "正在保存本地原件" }, true);
   const hash = await sourceHash(parsed.normalizedText);
   const metadata = {
     userId: state.auth.userId,
@@ -488,6 +643,7 @@ async function importResume(state: AppState): Promise<void> {
   };
   if (file) await storeResumeFile(metadata, file);
   else await storeResumeText(metadata, parsed.normalizedText);
+  updateResumeImportFeedback({ kind: "progress", message: "正在调用模型生成画像" }, true);
   await sendCommand({
     type: "IMPORT_RESUME",
     sourceName: parsed.sourceName,

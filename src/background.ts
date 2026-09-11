@@ -14,6 +14,7 @@ import {
   login,
   logout,
   register,
+  recordJobDetails,
   saveDraftProfile,
   saveFilterConfig,
   updateDraftProfile,
@@ -58,6 +59,14 @@ import type {
 
 const QUEUE_ALARM = "jobflow:queue";
 const DETAIL_ALARM_PREFIX = "jobflow:detail:";
+
+type PostDetailStage = "evaluating" | "generating";
+interface PostDetailResult {
+  status: "draft_ready" | "excluded" | "review_required";
+  reason?: string;
+  filter: NonNullable<BatchItem["filter"]>;
+  suitability?: NonNullable<BatchItem["suitability"]>;
+}
 
 function now(): string {
   return new Date().toISOString();
@@ -267,6 +276,22 @@ async function closeItemTab(item: BatchItem): Promise<void> {
   item.leaseId = undefined;
 }
 
+async function persistProcessingFailure(
+  opportunityId: string,
+  error: unknown,
+  settings?: ExtensionSettings
+): Promise<void> {
+  const errorCode = (error instanceof Error ? error.message : "处理失败").slice(0, 200);
+  try {
+    await invokeModel("record_failure", {
+      opportunityId,
+      errorCode
+    }, settings ?? await loadSettings(), false);
+  } catch {
+    // Failure recording is best-effort and must not block queue or retry cleanup.
+  }
+}
+
 async function finishItem(
   run: BatchRun,
   item: BatchItem,
@@ -281,11 +306,7 @@ async function finishItem(
       .find((candidate) => candidate.platform === item.candidate.platform
         && candidate.platformJobId === item.candidate.jobId);
     if (record) {
-      const settings = await loadSettings();
-      await invokeModel("record_failure", {
-        opportunityId: record.id,
-        errorCode: error.slice(0, 200)
-      }, settings, false).catch(() => undefined);
+      await persistProcessingFailure(record.id, error);
     }
   }
   const updated = completeCurrentItem(run, status, now(), error);
@@ -343,63 +364,79 @@ function opportunityForJob(records: OpportunityRecord[], job: DetailJob): Opport
   return records.find((item) => item.platform === job.platform && item.platformJobId === job.jobId);
 }
 
+async function processPostDetail(
+  opportunityId: string,
+  job: DetailJob,
+  settings: ExtensionSettings,
+  profile: ResumeProfile,
+  onStage: (stage: PostDetailStage) => Promise<void> = async () => undefined
+): Promise<PostDetailResult> {
+  const filter = evaluateRules(job, settings.rules);
+  if (filter.outcome !== "pass") {
+    await invokeModel("record_filter", {
+      opportunityId,
+      job,
+      filter
+    }, settings, false);
+    return {
+      status: filter.outcome === "exclude" ? "excluded" : "review_required",
+      reason: filter.decisions.map((decision) => decision.reason).join("；"),
+      filter
+    };
+  }
+
+  await onStage("evaluating");
+  const suitabilityRaw = unwrapGateway(await invokeModel("evaluate_opportunity", {
+    opportunityId,
+    job,
+    profile,
+    filter
+  }, settings));
+  const suitability = parseSuitabilityDecision(suitabilityRaw, job, profile);
+  if (suitability.outcome === "exclude") {
+    return { status: "excluded", reason: suitability.reasons.join("；"), filter, suitability };
+  }
+  if (suitability.outcome === "review") {
+    return { status: "review_required", reason: suitability.reasons.join("；"), filter, suitability };
+  }
+
+  await onStage("generating");
+  const greetingRaw = unwrapGateway(await invokeModel("generate_greeting", {
+    opportunityId,
+    job,
+    profile
+  }, settings));
+  parseGreetingDecision(greetingRaw, job, profile);
+  return { status: "draft_ready", filter, suitability };
+}
+
 async function handleDetail(job: DetailJob, leaseId: string): Promise<void> {
   const run = await getRun();
   if (!run || (run.status !== "running" && run.status !== "paused")) return;
   const item = run.items[run.currentIndex];
   if (!item || item.leaseId !== leaseId || item.candidate.jobId !== job.jobId) return;
   if (item.status !== "opening" && item.status !== "extracting") return;
+  await chrome.alarms.clear(detailAlarmName(run.id, leaseId));
   item.status = "extracting";
   item.candidate = { ...item.candidate, ...job };
   await saveRun(run);
-  const settings = await loadSettings();
-  const profile = await activeProfile();
-  if (!profile) return finishItem(run, item, "review_required", "已启用画像不存在");
   const records = await listOpportunities();
   const opportunity = opportunityForJob(records, job);
   if (!opportunity) return finishItem(run, item, "failed", "职位记录不存在");
 
   try {
-    item.filter = evaluateRules(job, settings.rules);
-    if (item.filter.outcome !== "pass") {
-      await invokeModel("record_filter", {
-        opportunityId: opportunity.id,
-        job,
-        filter: item.filter
-      }, settings, false);
-      return finishItem(
-        run,
-        item,
-        item.filter.outcome === "exclude" ? "excluded" : "review_required",
-        item.filter.decisions.map((decision) => decision.reason).join("；")
-      );
-    }
-
-    item.status = "evaluating";
-    await saveRun(run);
-    const suitabilityRaw = unwrapGateway(await invokeModel("evaluate_opportunity", {
-      opportunityId: opportunity.id,
-      job,
-      profile,
-      filter: item.filter
-    }, settings));
-    item.suitability = parseSuitabilityDecision(suitabilityRaw, job, profile);
-    if (item.suitability.outcome === "exclude") {
-      return finishItem(run, item, "excluded", item.suitability.reasons.join("；"));
-    }
-    if (item.suitability.outcome === "review") {
-      return finishItem(run, item, "review_required", item.suitability.reasons.join("；"));
-    }
-
-    item.status = "generating";
-    await saveRun(run);
-    const greetingRaw = unwrapGateway(await invokeModel("generate_greeting", {
-      opportunityId: opportunity.id,
-      job,
-      profile
-    }, settings));
-    parseGreetingDecision(greetingRaw, job, profile);
-    return finishItem(run, item, "draft_ready");
+    await recordJobDetails(opportunity.id, crypto.randomUUID(), job, await sourceHash(job.description));
+    const settings = await loadSettings();
+    const profile = await activeProfile();
+    if (!profile) return finishItem(run, item, "review_required", "已启用画像不存在");
+    const result = await processPostDetail(opportunity.id, job, settings, profile, async (status) => {
+      item.status = status;
+      await saveRun(run);
+      await notifyState();
+    });
+    item.filter = result.filter;
+    item.suitability = result.suitability;
+    return finishItem(run, item, result.status, result.reason);
   } catch (error) {
     return finishItem(run, item, "failed", error instanceof Error ? error.message : "处理失败");
   }
@@ -463,12 +500,8 @@ async function importResume(request: Extract<RuntimeRequest, { type: "IMPORT_RES
   return (await listResumeProfiles()).find((item) => item.id === savedId) ?? profile;
 }
 
-async function findOpportunityAndProfile(opportunityId: string) {
-  const [opportunities, profile] = await Promise.all([listOpportunities(), activeProfile()]);
-  const opportunity = opportunities.find((item) => item.id === opportunityId);
-  if (!opportunity || !opportunity.description) throw new Error("职位详情不可用");
-  if (!profile) throw new Error("已启用画像不存在");
-  const job = detailJobSchema.parse({
+function detailJobFromOpportunity(opportunity: OpportunityRecord): DetailJob {
+  return detailJobSchema.parse({
     platform: opportunity.platform,
     jobId: opportunity.platformJobId,
     url: opportunity.canonicalUrl,
@@ -485,7 +518,62 @@ async function findOpportunityAndProfile(opportunityId: string) {
     recruiter: opportunity.recruiter ?? "",
     recruiterTitle: opportunity.recruiterTitle ?? ""
   });
+}
+
+async function findOpportunityAndProfile(opportunityId: string) {
+  const [opportunities, profile] = await Promise.all([listOpportunities(), activeProfile()]);
+  const opportunity = opportunities.find((item) => item.id === opportunityId);
+  if (!opportunity || !opportunity.description) throw new Error("职位详情不可用");
+  if (!profile) throw new Error("已启用画像不存在");
+  const job = detailJobFromOpportunity(opportunity);
   return { opportunity, profile, job };
+}
+
+async function requireRetryModelReady(
+  settings: ExtensionSettings,
+  userId: string,
+  hasManagedEntitlement: boolean
+): Promise<void> {
+  if (settings.model.route === "managed") {
+    if (!hasManagedEntitlement) throw new Error("当前账号没有托管模型权益");
+    return;
+  }
+  if (!(await getByokKey(userId))) throw new Error("请先配置 BYOK 模型密钥");
+  if (!settings.model.connectionTestedAt
+    || settings.model.testedFingerprint !== await modelFingerprint(settings)) {
+    throw new Error("请先完成当前 BYOK 模型连接测试");
+  }
+}
+
+async function retryStoredOpportunity(opportunityId: string): Promise<PostDetailResult> {
+  const auth = await getAuthProjection();
+  if (auth.status !== "signed_in" || !auth.userId) throw new Error("请先登录");
+  const opportunity = (await listOpportunities()).find((item) => item.id === opportunityId);
+  if (!opportunity || opportunity.userId !== auth.userId) throw new Error("职位记录不存在或不属于当前账号");
+  if (opportunity.status !== "failed") throw new Error("只有处理失败的职位可以重试");
+  if (!opportunity.description?.trim()) throw new Error("职位详情不可用，无法从已保存记录重试");
+
+  const [settings, profile] = await Promise.all([loadSettings(), activeProfile()]);
+  if (!profile || !profile.facts.some((fact) => fact.approved)) {
+    throw new Error("请先审核并启用包含可引用事实的简历画像");
+  }
+  await requireRetryModelReady(settings, auth.userId, auth.vip === true);
+
+  try {
+    let job: DetailJob;
+    try {
+      job = detailJobFromOpportunity(opportunity);
+    } catch {
+      throw new Error("已保存职位详情格式无效");
+    }
+    const result = await processPostDetail(opportunity.id, job, settings, profile);
+    await notifyState();
+    return result;
+  } catch (error) {
+    await persistProcessingFailure(opportunity.id, error, settings);
+    await notifyState();
+    throw error;
+  }
 }
 
 async function generateForOpportunity(opportunityId: string): Promise<void> {
@@ -620,6 +708,9 @@ async function handleRequest(
       }
       return undefined;
     }
+    case "RETRY_STORED_OPPORTUNITY":
+      await retryStoredOpportunity(request.opportunityId);
+      return undefined;
     case "EDIT_DRAFT": {
       const settings = await loadSettings();
       await invokeModel("edit_draft", {

@@ -1,9 +1,11 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { BACKEND_CONFIG } from "./config";
+import { reportModelOutputDiagnostic } from "./model-diagnostics";
 import { STORAGE_KEYS } from "../defaults";
 import type {
   AuthProjection,
+  DetailJob,
   EvaluationRecord,
   JdRuleSettings,
   ListCandidate,
@@ -333,6 +335,22 @@ export async function upsertCandidates(candidates: ListCandidate[]): Promise<Opp
   return z.array(opportunityRowSchema).parse(data).map(mapOpportunity);
 }
 
+export async function recordJobDetails(
+  opportunityId: string,
+  requestId: string,
+  job: DetailJob,
+  jdHash: string
+): Promise<void> {
+  const client = await getSupabaseClient();
+  const { error } = await client.rpc("record_job_details", {
+    target_opportunity_id: opportunityId,
+    target_request_id: requestId,
+    job,
+    target_jd_hash: jdHash
+  });
+  if (error) throw new Error("保存职位详情失败");
+}
+
 export async function listOpportunities(): Promise<OpportunityRecord[]> {
   const client = await getSupabaseClient();
   const { data, error } = await client.from("job_opportunities")
@@ -440,6 +458,7 @@ export async function invokeModelGateway(
   const { data, error } = await client.functions.invoke("model-gateway", { body, headers });
   if (error) {
     let code = "request_failed";
+    let diagnosticMessage = "";
     const context = (error as { context?: unknown }).context;
     if (context instanceof Response) {
       try {
@@ -447,6 +466,9 @@ export async function invokeModelGateway(
         if (payload && typeof payload === "object") {
           const value = (payload as { error?: { code?: unknown } }).error?.code;
           if (typeof value === "string") code = value;
+          diagnosticMessage = reportModelOutputDiagnostic(
+            (payload as { error?: { diagnostics?: unknown } }).error?.diagnostics
+          );
         }
       } catch {
         code = "request_failed";
@@ -464,13 +486,18 @@ export async function invokeModelGateway(
       provider_http_error: "模型供应商拒绝了请求",
       provider_response_too_large: "模型供应商响应过大",
       invalid_schema: "模型输出结构无效",
+      model_output_invalid: "模型输出结构无效",
+      invalid_request_schema: "模型网关请求结构无效",
+      invalid_operation_payload: "模型操作数据结构无效",
+      trusted_data_invalid: "云端画像或职位数据结构无效",
+      provider_envelope_invalid: "模型供应商响应协议不兼容",
       invalid_model_json: "模型没有返回有效 JSON",
       ungrounded_profile: "模型画像包含无法定位的简历证据",
       ungrounded_jd_evidence: "模型结果包含无法定位的 JD 证据",
       unapproved_resume_fact: "模型引用了未批准的简历事实",
       unsafe_greeting: "模型生成的招呼语未通过安全校验"
     };
-    throw new Error(messages[code] ?? "模型服务请求失败");
+    throw new Error(diagnosticMessage || messages[code] || "模型服务请求失败");
   }
   return data;
 }

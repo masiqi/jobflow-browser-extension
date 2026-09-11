@@ -4,7 +4,9 @@ import type { DetailJob, ListCandidate } from "../types";
 const text = (root: ParentNode, selector: string): string => (root.querySelector<HTMLElement>(selector)?.innerText || root.querySelector(selector)?.textContent || "").replace(/\s+/g, " ").trim();
 
 export function isLiepinListPage(location: Location = window.location): boolean {
-  return /(^|\.)liepin\.com$/.test(location.hostname) && location.pathname === "/zhaopin/";
+  if (!/(^|\.)liepin\.com$/.test(location.hostname)) return false;
+  return location.pathname === "/zhaopin/"
+    || (location.hostname === "c.liepin.com" && location.pathname === "/");
 }
 
 export function isLiepinDetailPage(location: Location = window.location): boolean {
@@ -58,7 +60,9 @@ export function scanLiepinList(root: ParentNode = document): ListCandidate[] {
     const recruiter = text(card, ".recruiter-info-box");
     const companyArea = text(card, '[data-nick="job-detail-company-info"]');
     const title = text(anchor, '[title^="招聘"]') || lines[0] || "";
-    const location = lines.find((value) => /北京|上海|广州|深圳|杭州|成都|武汉|西安|南京|天津|重庆|苏州|全国/.test(value)) || "";
+    const location = (lines.find((value) => /北京|上海|广州|深圳|杭州|成都|武汉|西安|南京|天津|重庆|苏州|全国/.test(value)) || "")
+      .replace(/[【】]/g, "")
+      .trim();
     const salary = lines.find((value) => /\d+(?:\.\d+)?\s*[-~至]\s*\d+(?:\.\d+)?\s*k|\d+\s*[-~至]\s*\d+\s*万|面议/i.test(value)) || "";
     const experience = lines.find((value) => /经验不限|应届|实习|\d+年以上|\d+-\d+年/.test(value)) || "";
     const education = lines.find((value) => /本科|硕士|博士|大专|学历不限/.test(value)) || "";
@@ -94,7 +98,7 @@ export function extractLiepinDetail(root: ParentNode = document, href = location
     location: locationText, salary,
     experience: propertyText.match(/经验不限|应届|实习|\d+年以上|\d+-\d+年/)?.[0] || "",
     education: propertyText.match(/统招本科|本科|硕士|博士|大专|学历不限/)?.[0] || "",
-    cardText: bodyText.slice(0, 1500), index: -1, description: description.slice(0, 60_000),
+    cardText: bodyText.slice(0, 1500), index: 0, description: description.slice(0, 60_000),
     recruiter,
     recruiterTitle: text(root, ".recruiter-info .title") || text(root, ".recruiter-card .position") || text(root, ".hunter-info .title") || recruiterCareer.split(/[·]/)[0]?.trim() || ""
   };

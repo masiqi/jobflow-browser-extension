@@ -1,5 +1,11 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { parseGreetingDecision, parseSuitabilityDecision } from "../src/prompt";
+import {
+  buildGreetingMessages,
+  buildSuitabilityMessages,
+  parseGreetingDecision,
+  parseSuitabilityDecision
+} from "../src/prompt";
 import type { DetailJob, ResumeProfile } from "../src/types";
 
 const profile: ResumeProfile = {
@@ -43,6 +49,63 @@ const job: DetailJob = {
 };
 
 describe("model output validation", () => {
+  it("states every suitability array cardinality in both provider prompts", async () => {
+    const clientPrompt = buildSuitabilityMessages(job, profile, { outcome: "pass", decisions: [] })[0]?.content ?? "";
+    expect(clientPrompt).toContain("outcome 只能是 proceed、review 或 exclude 之一");
+    expect(clientPrompt).toContain("score 可省略，如提供必须是 0 到 100 的数字");
+    expect(clientPrompt).toContain("reasons 必须包含 1 到 6 项");
+    expect(clientPrompt).toContain("jdEvidence 最多包含 6 项，exclude 时至少包含 1 项");
+    expect(clientPrompt).toContain("必须逐字复制职位描述中的连续原文片段，不得改写、概括或添加省略号");
+    expect(clientPrompt).toContain("factIds 最多包含 6 个");
+
+    const edgeSource = await readFile("supabase/functions/model-gateway/index.ts", "utf8");
+    const edgePrompt = edgeSource.slice(
+      edgeSource.indexOf("function suitabilityMessages"),
+      edgeSource.indexOf("function greetingMessages")
+    );
+    expect(edgePrompt).toContain("outcome 只能是 proceed、review 或 exclude 之一");
+    expect(edgePrompt).toContain("score 可省略，如提供必须是 0 到 100 的数字");
+    expect(edgePrompt).toContain("reasons 必须包含 1 到 6 项");
+    expect(edgePrompt).toContain("jdEvidence 最多包含 6 项，exclude 时至少包含 1 项");
+    expect(edgePrompt).toContain("必须逐字复制职位描述中的连续原文片段，不得改写、概括或添加省略号");
+    expect(edgePrompt).toContain("factIds 最多包含 6 个");
+  });
+
+  it("requires exact JD excerpts in both greeting provider prompts", async () => {
+    const clientPrompt = buildGreetingMessages(job, profile)[0]?.content ?? "";
+    expect(clientPrompt).toContain("jdEvidence 必须包含 1 到 3 项");
+    expect(clientPrompt).toContain("必须逐字复制职位描述中的连续原文片段，不得改写、概括或添加省略号");
+    expect(clientPrompt).toContain("factIds 必须包含 1 到 2 个");
+
+    const edgeSource = await readFile("supabase/functions/model-gateway/index.ts", "utf8");
+    const edgePrompt = edgeSource.slice(
+      edgeSource.indexOf("function greetingMessages"),
+      edgeSource.indexOf("async function hydrateTrustedOpportunityPayload")
+    );
+    expect(edgePrompt).toContain("jdEvidence 必须包含 1 到 3 项");
+    expect(edgePrompt).toContain("必须逐字复制职位描述中的连续原文片段，不得改写、概括或添加省略号");
+    expect(edgePrompt).toContain("factIds 必须包含 1 到 2 个");
+  });
+
+  it("rejects suitability output outside the documented array bounds", () => {
+    const expandedProfile: ResumeProfile = {
+      ...profile,
+      facts: Array.from({ length: 7 }, (_, index) => ({
+        id: "fact-" + index,
+        text: "合成事实 " + index,
+        keywords: ["合成"],
+        evidence: "合成事实证据 " + index,
+        approved: true
+      }))
+    };
+    expect(() => parseSuitabilityDecision({
+      outcome: "proceed",
+      reasons: ["平台经验相关"],
+      jdEvidence: ["建设高可用任务平台"],
+      factIds: Array.from({ length: 7 }, (_, index) => "fact-" + index)
+    }, job, expandedProfile)).toThrow();
+  });
+
   it("accepts grounded suitability and rejects missing JD evidence", () => {
     expect(parseSuitabilityDecision({
       outcome: "proceed",

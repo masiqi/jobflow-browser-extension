@@ -45,9 +45,9 @@ const filterDecisionSchema = z.object({
 const suitabilityDecisionSchema = z.object({
   outcome: z.enum(["proceed", "exclude", "review"]),
   score: z.number().min(0).max(100).optional(),
-  reasons: z.array(z.string()),
-  jdEvidence: z.array(z.string()),
-  factIds: z.array(z.string())
+  reasons: z.array(z.string()).min(1).max(6),
+  jdEvidence: z.array(z.string()).max(6),
+  factIds: z.array(z.string()).max(6)
 }).strict();
 
 export const scanPreviewSchema = z.object({
@@ -178,6 +178,7 @@ export const runtimeRequestSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("ACTIVATE_PROFILE"), profileId: z.string().uuid() }).strict(),
   z.object({ type: z.literal("DETAIL_READY"), job: detailJobSchema, leaseId: z.string().uuid() }).strict(),
   z.object({ type: z.literal("DETAIL_FAILED"), jobId: z.string().max(128), leaseId: z.string().uuid(), error: z.string().max(500) }).strict(),
+  z.object({ type: z.literal("RETRY_STORED_OPPORTUNITY"), opportunityId: z.string().uuid() }).strict(),
   z.object({ type: z.literal("EDIT_DRAFT"), opportunityId: z.string().uuid(), text: z.string().min(1).max(200) }).strict(),
   z.object({ type: z.literal("REGENERATE_DRAFT"), opportunityId: z.string().uuid() }).strict(),
   z.object({ type: z.literal("REVIEW_DECISION"), opportunityId: z.string().uuid(), decision: z.enum(["continue_generation", "permanently_exclude"]) }).strict(),

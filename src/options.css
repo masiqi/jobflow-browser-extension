@@ -85,6 +85,7 @@ button {
 }
 button.primary { border-color: #1d6d50; background: #1d6d50; color: #fff; font-weight: 650; }
 button.danger-quiet { color: #a43d37; border-color: #dbb6b3; }
+button:disabled, input:disabled, textarea:disabled { cursor: not-allowed; opacity: 0.62; }
 .details { display: grid; grid-template-columns: 150px minmax(0, 1fr); max-width: 760px; margin: 20px 0; border-top: 1px solid #d7dde3; }
 .details dt, .details dd { margin: 0; padding: 11px 4px; border-bottom: 1px solid #d7dde3; }
 .details dt { color: #697684; }
@@ -92,12 +93,43 @@ button.danger-quiet { color: #a43d37; border-color: #dbb6b3; }
 .import-band label > input, .import-band label > textarea { display: block; margin-top: 5px; }
 .import-band span { align-self: center; color: #7a8793; text-align: center; }
 .import-band .paste textarea { min-height: 76px; }
+.import-button { min-width: 196px; }
+.import-button[data-busy="true"] { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+.import-button[data-busy="true"]::before {
+  content: "";
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  border: 2px solid #ffffff73;
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: import-spin 0.8s linear infinite;
+}
+.import-status {
+  min-height: 40px;
+  max-width: 860px;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  line-height: 1.4;
+}
+.import-status:empty { display: none; }
+.import-status.progress { color: #315066; background: #e8f0f4; border-color: #c8d6df; }
+.import-status.success { color: #17633c; background: #e2f2e8; border-color: #b9dcc8; }
+.import-status.error { color: #9c342e; background: #f8e5e3; border-color: #e4bbb7; }
+@keyframes import-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .import-button[data-busy="true"]::before { animation: none; }
+}
 .profile-status { min-height: 52px; display: flex; align-items: center; gap: 10px; margin: 18px 0; }
 .profile-status small { margin-left: auto; color: #6b7885; }
 .badge { display: inline-flex; align-items: center; min-height: 24px; padding: 3px 7px; border-radius: 4px; background: #e6ebef; color: #4e5d6a; font-size: 12px; }
 .badge.active, .badge.draft_ready { background: #dff2e7; color: #17633c; }
 .badge.draft, .badge.review_required { background: #fff0ce; color: #82580d; }
 .badge.model_excluded, .badge.deterministic_excluded, .badge.user_excluded, .badge.failed { background: #f8dfdc; color: #9c342e; }
+.fact-list-heading { min-height: 44px; display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 18px; }
+.fact-list-heading h3 { margin: 0; }
 .fact-list { display: grid; gap: 8px; }
 .fact { padding: 12px 0; border-bottom: 1px solid #dce2e7; }
 .fact > input { margin: 8px 0; }
@@ -131,6 +163,15 @@ button.danger-quiet { color: #a43d37; border-color: #dbb6b3; }
 .detail-heading p { margin: 0; color: #687582; }
 .reason, .detail-section { padding: 16px 0; border-bottom: 1px solid #dce2e7; }
 .reason p, .detail-section p { line-height: 1.6; overflow-wrap: anywhere; }
+.stored-retry { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 14px 0; border-bottom: 1px solid #dce2e7; }
+.stored-retry-status { flex: 1 1 280px; min-width: 0; margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.stored-retry-status:empty { display: none; }
+.stored-retry-status.progress { color: #315066; }
+.stored-retry-status.success { color: #17633c; }
+.stored-retry-status.error { color: #9c342e; }
+.recruiter-metadata { margin: 0 0 10px; color: #4d5d6b; }
+.job-description { max-height: 420px; overflow: auto; padding: 12px 0; border-top: 1px solid #e0e5ea; white-space: pre-wrap; line-height: 1.7; overflow-wrap: anywhere; }
+.detail-hash { display: block; margin-top: 8px; color: #73808c; overflow-wrap: anywhere; }
 blockquote { margin: 10px 0 0; padding: 10px 12px; border-left: 3px solid #d0a13e; background: #faf7ef; white-space: pre-wrap; }
 .evidence-item { padding: 8px 0; }
 .evidence-item + .evidence-item { border-top: 1px solid #e2e7eb; }

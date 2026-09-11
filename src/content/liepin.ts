@@ -71,7 +71,15 @@ async function reportLeasedDetail(): Promise<void> {
     }
     const job = extractLiepinDetail();
     if (job) {
-      await chrome.runtime.sendMessage({ type: "DETAIL_READY", job, leaseId });
+      const response: CommandResponse = await chrome.runtime.sendMessage({ type: "DETAIL_READY", job, leaseId });
+      if (!response.ok) {
+        await chrome.runtime.sendMessage({
+          type: "DETAIL_FAILED",
+          jobId: job.jobId,
+          leaseId,
+          error: ("详情数据未被接受：" + (response.error || "后台校验失败")).slice(0, 500)
+        });
+      }
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));

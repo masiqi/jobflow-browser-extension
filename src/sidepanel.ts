@@ -9,11 +9,41 @@ import {
   createElement
 } from "lucide";
 import { escapeHtml, sendCommand } from "./ui/command";
-import type { AppState, ScanPreview } from "./types";
+import type { AppState, BatchRun, OpportunityRecord, ScanPreview } from "./types";
+
+type ScanFeedback = {
+  kind: "idle" | "progress" | "success" | "error";
+  message: string;
+};
+
+const BATCH_STATUS_LABELS: Record<BatchRun["status"], string> = {
+  queued: "等待开始",
+  running: "处理中",
+  paused: "已暂停",
+  completed: "已完成",
+  cancelled: "已取消",
+  failed: "批次失败"
+};
+
+const ITEM_STATUS_LABELS: Record<BatchRun["items"][number]["status"], string> = {
+  queued: "等待处理",
+  opening: "正在打开职位详情",
+  extracting: "正在读取职位详情",
+  evaluating: "正在调用模型评估",
+  generating: "正在生成招呼语",
+  draft_ready: "草稿已生成",
+  excluded: "已排除",
+  review_required: "需要人工复核",
+  failed: "处理失败"
+};
 
 const appElement = document.querySelector<HTMLDivElement>("#app");
 if (!appElement) throw new Error("侧边栏根节点不存在");
 const app: HTMLDivElement = appElement;
+let scanBusy = false;
+let scanFeedback: ScanFeedback = { kind: "idle", message: "" };
+let selectedJobIds: Set<string> | null = null;
+let selectedSourceUrl = "";
 
 function iconButton(
   id: string,
@@ -32,7 +62,47 @@ function iconButton(
   return button;
 }
 
-function previewMarkup(preview: ScanPreview | null): string {
+function scanButton(disabled: boolean): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.id = "scan";
+  button.type = "button";
+  button.className = "primary scan-button";
+  button.title = "扫描当前猎聘页面";
+  button.setAttribute("aria-label", "扫描当前猎聘页面");
+  button.setAttribute("aria-busy", String(scanBusy));
+  button.dataset.busy = String(scanBusy);
+  button.disabled = disabled || scanBusy;
+  button.append(
+    createElement(ScanSearch, { width: 17, height: 17, "stroke-width": 2 }),
+    Object.assign(document.createElement("span"), {
+      textContent: scanBusy ? "正在扫描" : "扫描当前页"
+    })
+  );
+  return button;
+}
+
+function selectedJobsForState(preview: ScanPreview | null, run: BatchRun | null): Set<string> {
+  if (!preview) {
+    selectedJobIds = null;
+    selectedSourceUrl = "";
+    return new Set();
+  }
+  if (!selectedJobIds || selectedSourceUrl !== preview.sourceUrl) {
+    const runSelection = run?.sourceUrl === preview.sourceUrl
+      ? run.items.map((item) => item.candidate.jobId)
+      : null;
+    selectedJobIds = new Set(runSelection ?? preview.selectedJobIds);
+    selectedSourceUrl = preview.sourceUrl;
+  }
+  return selectedJobIds;
+}
+
+function resetSelectedJobs(preview: ScanPreview): void {
+  selectedJobIds = new Set(preview.selectedJobIds);
+  selectedSourceUrl = preview.sourceUrl;
+}
+
+function previewMarkup(preview: ScanPreview | null, selectedJobs: Set<string>): string {
   if (!preview) return '<p class="empty">扫描当前猎聘结果页后，可选择新职位生成草稿。</p>';
   return [
     '<div class="metrics">',
@@ -41,17 +111,50 @@ function previewMarkup(preview: ScanPreview | null): string {
     '<div><strong>' + preview.duplicateCount + '</strong><span>重复</span></div>',
     '<div><strong>' + preview.draftedCount + '</strong><span>已有草稿</span></div>',
     '</div>',
-    '<div class="candidate-list">',
+    preview.candidates.length
+      ? '<div class="candidate-list">'
+      : '<p class="scan-empty">当前页面未识别到职位，页面仍在加载时可稍后重试。</p>',
     preview.candidates.map((candidate) => {
-      const selected = preview.selectedJobIds.includes(candidate.jobId);
+      const selected = selectedJobs.has(candidate.jobId);
       const processable = preview.processableJobIds.includes(candidate.jobId);
       return '<label class="candidate ' + (processable ? "" : "disabled") + '"><input type="checkbox" data-job-id="' + escapeHtml(candidate.jobId)
         + '" ' + (selected ? "checked" : "") + " " + (processable ? "" : "disabled") + '><span><b>' + escapeHtml(candidate.title)
         + '</b><small>' + escapeHtml(candidate.company) + " · " + escapeHtml(candidate.salary)
         + '</small></span></label>';
     }).join(""),
-    '</div>'
+    preview.candidates.length ? '</div>' : ""
   ].join("");
+}
+
+function runMarkup(run: BatchRun | null): string {
+  if (!run) return '<p class="empty">尚未运行批次。</p>';
+  const failures = run.items.filter((item) => item.status === "failed" && item.error);
+  const currentItem = run.items[run.currentIndex];
+  return [
+    '<div class="run"><div class="progress"><span style="width:',
+    String(Math.round(run.currentIndex / Math.max(1, run.items.length) * 100)),
+    '%"></span></div><p><b>', escapeHtml(BATCH_STATUS_LABELS[run.status]), "</b> · ",
+    String(run.currentIndex), "/", String(run.items.length),
+    '</p><small>草稿 ', String(run.draftCount), " · 排除 ", String(run.excludedCount),
+    " · 复核 ", String(run.reviewCount), " · 失败 ", String(run.failedCount), "</small>",
+    currentItem ? '<div class="run-current"><b>' + escapeHtml(currentItem.candidate.title) + '</b><span>'
+      + escapeHtml(ITEM_STATUS_LABELS[currentItem.status]) + "</span></div>" : "",
+    failures.length ? '<div class="run-failures">' + failures.map((item) =>
+      '<div class="run-failure"><b>' + escapeHtml(item.candidate.title) + '</b><span>'
+      + escapeHtml(item.error) + "</span></div>"
+    ).join("") + "</div>" : "",
+    "</div>"
+  ].join("");
+}
+
+function recordsMarkup(records: OpportunityRecord[]): string {
+  return records.slice(0, 8).map((record) =>
+    '<div class="record"><span class="status ' + escapeHtml(record.status) + '"></span><div><b>'
+    + escapeHtml(record.title) + '</b><small>' + escapeHtml(record.company) + " · "
+    + escapeHtml(record.status) + '</small>'
+    + (record.latestReason ? '<small class="record-reason">原因：' + escapeHtml(record.latestReason) + "</small>" : "")
+    + "</div></div>"
+  ).join("") || '<p class="empty">暂无职位记录。</p>';
 }
 
 async function render(): Promise<void> {
@@ -63,6 +166,12 @@ async function render(): Promise<void> {
     return;
   }
   const run = state.run;
+  const selectedJobs = selectedJobsForState(state.scanPreview, run);
+  const selectedCount = selectedJobs.size;
+  const batchActive = run?.status === "running" || run?.status === "paused" || run?.status === "queued";
+  const selectionWithinLimit = selectedCount > 0
+    && selectedCount <= state.settings.maxJobsPerBatch
+    && !batchActive;
   app.innerHTML = [
     '<header><div><h1>JobFlow</h1><p>',
     state.auth.status === "signed_in"
@@ -73,27 +182,20 @@ async function render(): Promise<void> {
       + '</small></div><div id="header-actions"></div></header>',
     '<section class="status-band"><span class="dot"></span><div><b>仅生成草稿</b><small>不会投递、发送或操作猎聘筛选器</small></div></section>',
     '<section><div class="section-title"><h2>当前结果</h2><div id="scan-actions"></div></div>',
-    previewMarkup(state.scanPreview),
+    '<div id="scanStatus" class="scan-status ' + escapeHtml(scanFeedback.kind)
+      + '" role="status" aria-live="polite">' + escapeHtml(scanFeedback.message) + "</div>",
+    previewMarkup(state.scanPreview, selectedJobs),
     '<div class="batch-row"><label>本批上限<input id="batchLimit" type="number" min="1" max="20" value="',
     String(state.settings.maxJobsPerBatch),
-    '"></label><button id="start" class="primary" type="button"',
-    state.scanPreview?.selectedJobIds.length ? "" : " disabled",
-    '>开始生成</button></div></section>',
+    '"></label><div class="batch-start"><small id="selectionSummary">已选 ', String(selectedCount), " / 上限 ",
+    String(state.settings.maxJobsPerBatch), '</small><button id="start" class="primary" type="button"',
+    selectionWithinLimit ? "" : " disabled",
+    '>', batchActive ? "批次进行中" : "开始生成", "</button></div></div></section>",
     '<section><div class="section-title"><h2>批次</h2><div id="run-actions"></div></div>',
-    run
-      ? '<div class="run"><div class="progress"><span style="width:' + Math.round(run.currentIndex / Math.max(1, run.items.length) * 100)
-        + '%"></span></div><p><b>' + escapeHtml(run.status) + '</b> · '
-        + run.currentIndex + "/" + run.items.length + '</p><small>草稿 ' + run.draftCount
-        + " · 排除 " + run.excludedCount + " · 复核 " + run.reviewCount + " · 失败 " + run.failedCount + "</small></div>"
-      : '<p class="empty">尚未运行批次。</p>',
+    runMarkup(run),
     '</section>',
     '<section><div class="section-title"><h2>最近记录</h2><button id="viewAll" class="link-button" type="button">查看全部</button></div>',
-    '<div class="records">',
-    state.opportunities.slice(0, 8).map((record) =>
-      '<div class="record"><span class="status ' + escapeHtml(record.status) + '"></span><div><b>'
-      + escapeHtml(record.title) + '</b><small>' + escapeHtml(record.company) + " · "
-      + escapeHtml(record.status) + '</small></div></div>'
-    ).join("") || '<p class="empty">暂无职位记录。</p>',
+    '<div class="records">', recordsMarkup(state.opportunities),
     '</div></section>',
     '<div id="toast" role="status" aria-live="polite"></div>'
   ].join("");
@@ -101,7 +203,7 @@ async function render(): Promise<void> {
   const headerActions = document.querySelector("#header-actions");
   headerActions?.append(iconButton("settings", "打开管理台", Settings));
   const scanActions = document.querySelector("#scan-actions");
-  scanActions?.append(iconButton("scan", "扫描当前页面", ScanSearch, state.auth.status !== "signed_in"));
+  scanActions?.append(scanButton(state.auth.status !== "signed_in"));
   scanActions?.append(iconButton("refresh", "刷新状态", RefreshCw));
   const runActions = document.querySelector("#run-actions");
   runActions?.append(iconButton("pause", "暂停批次", CirclePause, run?.status !== "running"));
@@ -111,10 +213,19 @@ async function render(): Promise<void> {
   document.querySelector("#settings")?.addEventListener("click", () => chrome.runtime.openOptionsPage());
   document.querySelector("#viewAll")?.addEventListener("click", () => chrome.runtime.openOptionsPage());
   document.querySelector("#refresh")?.addEventListener("click", () => void render());
-  document.querySelector("#scan")?.addEventListener("click", () => void perform({ type: "SCAN_CURRENT_TAB" }));
+  document.querySelector("#scan")?.addEventListener("click", () => void scanCurrentPage());
   document.querySelector("#pause")?.addEventListener("click", () => void perform({ type: "PAUSE_BATCH" }));
   document.querySelector("#resume")?.addEventListener("click", () => void perform({ type: "RESUME_BATCH" }));
   document.querySelector("#cancel")?.addEventListener("click", () => void perform({ type: "CANCEL_BATCH" }));
+  document.querySelectorAll<HTMLInputElement>("[data-job-id]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const jobId = input.dataset.jobId;
+      if (!jobId || !selectedJobIds) return;
+      if (input.checked) selectedJobIds.add(jobId);
+      else selectedJobIds.delete(jobId);
+      updateSelectionControls(state.settings.maxJobsPerBatch, batchActive);
+    });
+  });
   document.querySelector("#batchLimit")?.addEventListener("change", async (event) => {
     const input = event.currentTarget as HTMLInputElement;
     const value = Math.max(1, Math.min(20, Number(input.value) || 10));
@@ -124,12 +235,57 @@ async function render(): Promise<void> {
     });
   });
   document.querySelector("#start")?.addEventListener("click", () => {
-    const selectedJobIds = [...document.querySelectorAll<HTMLInputElement>("[data-job-id]:checked")]
-      .slice(0, state.settings.maxJobsPerBatch)
-      .map((input) => input.dataset.jobId || "")
-      .filter(Boolean);
-    void perform({ type: "START_BATCH", selectedJobIds });
+    const candidateIds = state.scanPreview?.candidates.map((candidate) => candidate.jobId) ?? [];
+    const selected = candidateIds.filter((jobId) => selectedJobIds?.has(jobId));
+    void perform({ type: "START_BATCH", selectedJobIds: selected });
   });
+}
+
+function updateSelectionControls(limit: number, batchActive: boolean): void {
+  const count = selectedJobIds?.size ?? 0;
+  const summary = document.querySelector<HTMLElement>("#selectionSummary");
+  const start = document.querySelector<HTMLButtonElement>("#start");
+  if (summary) summary.textContent = "已选 " + count + " / 上限 " + limit;
+  if (start) start.disabled = batchActive || count === 0 || count > limit;
+}
+
+function updateScanFeedback(feedback: ScanFeedback, busy: boolean): void {
+  scanFeedback = feedback;
+  scanBusy = busy;
+  const status = document.querySelector<HTMLElement>("#scanStatus");
+  const button = document.querySelector<HTMLButtonElement>("#scan");
+  if (status) {
+    status.textContent = feedback.message;
+    status.className = "scan-status " + feedback.kind;
+  }
+  if (button) {
+    button.disabled = busy;
+    button.setAttribute("aria-busy", String(busy));
+    button.dataset.busy = String(busy);
+    const label = button.querySelector("span");
+    if (label) label.textContent = busy ? "正在扫描" : "扫描当前页";
+  }
+}
+
+async function scanCurrentPage(): Promise<void> {
+  if (scanBusy) return;
+  updateScanFeedback({ kind: "progress", message: "正在扫描当前页已加载的职位" }, true);
+  try {
+    const preview = await sendCommand<ScanPreview>({ type: "SCAN_CURRENT_TAB" });
+    resetSelectedJobs(preview);
+    await render();
+    updateScanFeedback({
+      kind: "success",
+      message: preview.observedCount > 0
+        ? "扫描完成，发现 " + preview.observedCount + " 个职位"
+        : "扫描完成，当前页面未识别到职位"
+    }, false);
+  } catch (error) {
+    updateScanFeedback({
+      kind: "error",
+      message: error instanceof Error ? error.message : String(error)
+    }, false);
+  }
 }
 
 async function perform(request: Parameters<typeof sendCommand>[0]): Promise<void> {

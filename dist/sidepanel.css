@@ -27,6 +27,7 @@ section { padding: 14px; border-bottom: 1px solid #d8dee6; background: #fff; }
 .status-band small { display: block; color: #347452; margin-top: 2px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: #2f8f58; flex: 0 0 auto; }
 .section-title { min-height: 32px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#scan-actions { display: flex; align-items: center; }
 .icon-button {
   width: 32px;
   height: 32px;
@@ -41,6 +42,28 @@ section { padding: 14px; border-bottom: 1px solid #d8dee6; background: #fff; }
 }
 .icon-button:disabled { opacity: .38; cursor: default; }
 .icon-button:focus-visible, button:focus-visible, input:focus-visible { outline: 3px solid #efb443; outline-offset: 2px; }
+.scan-button { min-width: 116px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; white-space: nowrap; }
+.scan-button[data-busy="true"]::before {
+  content: "";
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  border: 2px solid #ffffff73;
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: scan-spin 0.8s linear infinite;
+}
+.scan-button[data-busy="true"] svg { display: none; }
+.scan-status { min-height: 34px; margin: 8px 0 4px; padding: 8px 9px; border: 1px solid transparent; border-radius: 5px; line-height: 1.35; }
+.scan-status:empty { display: none; }
+.scan-status.progress { color: #315066; background: #e8f0f4; border-color: #c8d6df; }
+.scan-status.success { color: #17633c; background: #e2f2e8; border-color: #b9dcc8; }
+.scan-status.error { color: #9c342e; background: #f8e5e3; border-color: #e4bbb7; }
+.scan-empty { color: #795c19; background: #fff7e3; border: 1px solid #ead7a3; border-radius: 5px; padding: 10px; line-height: 1.45; }
+@keyframes scan-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .scan-button[data-busy="true"]::before { animation: none; }
+}
 .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin: 8px 0 12px; }
 .metrics div { min-width: 0; padding: 8px 4px; text-align: center; border: 1px solid #dce2e9; border-radius: 5px; background: #f8fafb; }
 .metrics strong { display: block; font-size: 16px; }
@@ -54,17 +77,27 @@ section { padding: 14px; border-bottom: 1px solid #d8dee6; background: #fff; }
 .batch-row { min-height: 50px; display: flex; align-items: end; justify-content: space-between; gap: 10px; margin-top: 10px; }
 .batch-row label { color: #65717f; }
 .batch-row input { display: block; width: 74px; height: 32px; margin-top: 4px; border: 1px solid #bbc5cf; border-radius: 5px; padding: 0 8px; }
+.batch-start { display: flex; align-items: end; gap: 9px; }
+.batch-start small { min-width: 88px; padding-bottom: 8px; text-align: right; white-space: nowrap; }
 button.primary { min-height: 34px; border: 0; border-radius: 5px; background: #1d6d50; color: #fff; padding: 7px 14px; font-weight: 650; cursor: pointer; }
 button.primary:disabled { opacity: .45; cursor: default; }
 .progress { height: 6px; border-radius: 3px; overflow: hidden; background: #e4e8ed; margin: 8px 0; }
 .progress span { display: block; height: 100%; background: #318060; }
 .run p { margin: 6px 0 3px; }
+.run-current { margin-top: 10px; padding: 9px 0; border-top: 1px solid #dce2e9; }
+.run-current b, .run-current span { display: block; overflow-wrap: anywhere; }
+.run-current span { margin-top: 3px; color: #315f78; }
+.run-failures { margin-top: 10px; border-top: 1px solid #e5c2bf; }
+.run-failure { padding: 8px 0; color: #8e332e; }
+.run-failure b, .run-failure span { display: block; overflow-wrap: anywhere; }
+.run-failure span { margin-top: 3px; }
 .records { margin-top: 4px; }
 .record { min-height: 48px; display: grid; grid-template-columns: 10px minmax(0, 1fr); gap: 8px; align-items: center; border-bottom: 1px solid #e8ecf0; }
 .status { width: 7px; height: 7px; border-radius: 50%; background: #758292; }
 .status.draft_ready { background: #238657; }
 .status.review_required { background: #c48615; }
 .status.failed, .status.model_excluded, .status.deterministic_excluded, .status.user_excluded { background: #bd4a42; }
+.record-reason { color: #9f332d; }
 .empty { color: #788492; padding: 12px 0; line-height: 1.5; }
 .error, #toast { margin: 12px; color: #9f332d; background: #fff0ef; border: 1px solid #edc0bc; padding: 10px; border-radius: 5px; }
 #toast:empty { display: none; }
