@@ -63,3 +63,24 @@ Added durable Liepin detail capture, safe model diagnostics, stored-detail retri
 ### Next Steps
 
 - Plan separately approved reviewed_send support for one Liepin opportunity with verified application and greeting evidence.
+
+
+## Session 3: Liepin reviewed submit-and-contact
+
+**Date**: 2026-09-12
+**Task**: Liepin reviewed submit-and-contact
+**Branch**: `main`
+
+### Summary
+
+Added two-stage reviewed Liepin application and greeting, component evidence and quota recovery, persisted-JD retry, and fixed batch recovery after the first detail item; verified the live single-opportunity flow and full automated gates.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9a525b7` | (see git log) |
+
+### Status
+
+[OK] **Completed**
