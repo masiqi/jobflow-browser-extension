@@ -36,6 +36,29 @@ Stored-detail retry runtime command:
 { type: "RETRY_STORED_OPPORTUNITY", opportunityId: string /* UUID */ }
 ~~~
 
+Batch runtime command:
+
+~~~typescript
+{ type: "START_BATCH", selectedJobIds: string[], expectedExecutionPolicy: "draft_only" | "reviewed_send" | "automatic_send" }
+~~~
+
+Automatic execution settings and current-device throttle:
+
+~~~typescript
+{
+  executionPolicy: "draft_only" | "reviewed_send" | "automatic_send";
+  automaticSendDelayMinSeconds: number; // integer, 5-600, default 10
+  automaticSendDelayMaxSeconds: number; // integer, 5-600, default 20, >= min
+}
+{
+  ownerId: string;
+  platform: "liepin";
+  lastWriteStartedAt: string;
+  scheduledDelaySeconds: number;
+  nextWriteEligibleAt: string;
+}
+~~~
+
 Reviewed-send runtime commands:
 
 ~~~typescript
@@ -77,12 +100,14 @@ Runtime requests:
 - Decode unknown once in src/domain/messages.ts.
 - Use a discriminated type field.
 - Reject unknown fields with strict Zod objects.
-- Live behavior exists only in the strict prepare/confirm reviewed-send commands. No batch, automatic, page-load, scroll, pagination, upload, or free-form platform command exists.
+- Live behavior exists only in strict reviewed-send prepare/confirm commands or in a side-panel `automatic_send` batch whose selected IDs and execution policy were explicitly authorized at start. Page-load, scan, settings save, startup, scroll, pagination, upload, and free-form platform commands cannot write to Liepin.
 - Content scan returns sourceUrl plus at most 500 decoded list candidates.
-- A batch accepts 1 through 20 selected platform job IDs.
+- A batch accepts 1 through 20 selected platform job IDs. Batch start is accepted only from the exact extension side panel URL, must include the expected execution policy, must match trusted settings, and must fail if another queued/running/paused run already exists.
 - Stored-detail retry accepts only an opportunity UUID. JD text, profile data, model credentials, and status cannot be supplied by the page command.
 - Reviewed-send initiation is accepted only from the exact extension options page and carries opportunity/revision/hash identity, never caller-supplied message or JD content.
+- Automatic delivery is accepted only for the current item in a newly authorized `automatic_send` run after detail capture and model-generated draft identity are persisted in the run snapshot. Historical drafts and user overrides remain reviewed-send only.
 - Content execution requires the same successful, unexpired, job-bound preflight lease and rechecks the SHA-256 of `draftText` before any platform action.
+- Every Liepin live write, reviewed or automatic, must acquire the shared non-reentrant live-write mutex before quota/write-start/content execution. Duplicate queue alarms, duplicate button paths, or overlapping service-worker continuations may reschedule or fail closed, but they must not overlap or double-execute a platform write.
 
 Opportunity identity:
 
@@ -106,9 +131,10 @@ Auth and local storage:
 - chrome.storage.local and session access levels are TRUSTED_CONTEXTS.
 - Persisted settings, scan previews, and batch runs are parsed with their canonical strict schema before writing and after reading; an invalid mutation must fail at the write boundary instead of poisoning recoverable state.
 - `BatchItem.candidate` stores only the `ListCandidate` snapshot. Accepted `DetailJob` fields belong in the owner-scoped opportunity record and must not be merged into the batch candidate.
+- Automatic interval alarms are derived from the persisted batch run and persisted owner/platform throttle. An alarm for a missing, non-running, mismatched, paused, cancelled, or replaced run is stale and must be ignored without scheduling queue processing or touching quota/write state.
 - Content scripts never access Chrome storage, tokens, BYOK credentials, or source resumes.
 - BYOK records contain ownerId and value and are returned only for that owner.
-- A device-owner change clears settings, run, scan, and BYOK state.
+- A device-owner change clears settings, run, scan, automatic-write throttle, and BYOK state.
 - IndexedDB resume keys contain user ID and source hash.
 
 Long-running UI commands:
@@ -122,6 +148,7 @@ Long-running UI commands:
 - Show the actual selected count separately from the configured upper limit, and submit exactly the selected IDs.
 - Failed batch items and opportunity summaries expose their redacted local `error` / `latestReason` in the side panel.
 - Running batches show the current item's domain stage; a completed-item fraction such as `0/1` is not sufficient feedback by itself.
+- Automatic wait countdown rendering is client-side display only. Re-rendering the side panel or updating the countdown must not redraw intervals, consume quota, run preflight, or trigger content execution.
 
 Phase-owned timeouts:
 
@@ -201,6 +228,8 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 | Unknown/extra runtime field | Reject before command dispatch |
 | Missing or malformed persisted run/scan | Return null; do not resume |
 | In-memory batch run has an unknown or detail-only candidate field | Reject before overwriting the stored run |
+| Automatic interval is fractional, outside 5-600, or minimum exceeds maximum | Reject settings before replacing the last valid configuration |
+| Automatic throttle owner/platform differs from the signed-in context | Return no throttle; never delay or authorize another owner's write |
 | Content script requests storage/token | No API exists; storage is TRUSTED_CONTEXTS |
 | User ID changes on current Chrome profile | Clear previous device settings, run, scan, and BYOK |
 | Cross-user table/RPC access | RLS or ownership check returns 42501 |
@@ -223,6 +252,7 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 | Long-running UI command pending | Show stage, set `aria-busy`, disable trigger, and ignore duplicate invocation |
 | Long-running UI command fails | Keep the error visible, clear busy state, and restore retry controls |
 | User changes preview selection, then `RUN_UPDATED` renders | Preserve the user's IDs and show the same selected count |
+| `START_BATCH` handler is already busy | Keep the start control disabled/aria-busy and do not visually re-enable it from selection changes |
 | Batch item fails | Show its redacted local reason in batch and recent-record summaries |
 | Batch item is not terminal | Show the current title and queued/opening/extracting/evaluating/generating stage |
 | Matching leased detail payload is accepted | Clear the detail-readiness alarm before filtering/model work |
@@ -247,6 +277,10 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 | Exact reviewed text appears as outbound chat content | Mark greeting verified |
 | One component verified | Derive partial and retry only the missing component |
 | Both components verified | Derive succeeded and hide replay controls |
+| Duplicate automatic queue wake for one run | At most one path acquires the live-write mutex; the loser does not preflight or write |
+| Automatic wait alarm fires before `nextWriteEligibleAt` | Preserve the same timestamp and reschedule without redrawing delay or touching quota/write |
+| Automatic wait alarm fires after pause, cancel, completion, or run replacement | Treat as stale and ignore; cancel clears that run's alarm |
+| Chrome startup/reload finds `delivery_in_progress` automatic item | Classify as post-write ambiguity, close the extension-owned stale tab when known, advance the item, pause the run, and never automatically replay that opportunity |
 
 ### 5. Good/Base/Bad Cases
 
@@ -268,6 +302,9 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 - Good: PREPARE observes one job-bound primary action and returns awaiting confirmation with zero quota and zero platform writes.
 - Good: Liepin sends its default first-contact text, JobFlow later verifies its own exact custom message and a rendered resume card as two separate facts.
 - Good: a partial record with verified greeting reopens the existing chat only to verify/send the missing application; it never resends the greeting.
+- Good: an automatic run paused before write resumes by reopening a fresh matching detail page and using the persisted authoritative draft identity; it does not rerun suitability or greeting generation.
+- Good: an elapsed automatic interval alarm runs a fresh final preflight and may write only if the run/item/policy/job/draft identities still match.
+- Bad: treat a visible side-panel countdown reaching zero as authorization to send, or replay `delivery_in_progress` after a browser restart.
 - Bad: interpret `dispatchEvent()` return value, a completed click promise, `已沟通`, or absence of an exception as successful application.
 - Bad: choose the first textarea or `发送` text from the whole document instead of a unique chat-local composer/control pair.
 - Bad: store a raw BYOK string without ownerId or allow content-script storage access.
@@ -293,6 +330,9 @@ For every contract change, update the nearest focused test and rerun the full ga
 - tests/options-ui.test.ts: delayed long-running command feedback, duplicate blocking, failure recovery, and bulk fact approval.
 - tests/sidepanel-ui.test.ts: recognizable scan command, pending/duplicate behavior, inline completion/failure, and zero-result state.
 - tests/sidepanel-ui.test.ts: selection preservation across batch render, selected-count accuracy, and visible failure reasons.
+- tests/sidepanel-ui.test.ts: start-busy selection changes do not visually re-enable the start button, and automatic wait countdown updates while the side panel remains open.
+- tests/batch-persistence.test.ts: strict automatic live-write mutex, stale/early/elapsed automatic wait alarms, cancel alarm clearing, draft-identity resume without model rerun, and `delivery_in_progress` startup recovery as post-write ambiguity.
+- tests/safety.test.ts: allowlisted side-panel automatic authorization and internal background delivery flow; scan/settings/startup/content/options paths cannot initiate live execution outside those boundaries.
 - tests/contracts.test.ts: detail-readiness alarm clearing precedes deterministic and model processing.
 - tests/liepin-content.test.ts: rejected `DETAIL_READY` acknowledgements become explicit detail failures.
 - tests/options-ui.test.ts: persisted JD and recruiter metadata render without a platform tab.

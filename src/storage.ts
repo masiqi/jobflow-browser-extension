@@ -1,6 +1,6 @@
 import { DEFAULT_SETTINGS, LEGACY_STORAGE_KEYS, STORAGE_KEYS } from "./defaults";
-import { batchRunSchema, extensionSettingsSchema, scanPreviewSchema } from "./domain/messages";
-import type { BatchRun, ExtensionSettings, ScanPreview } from "./types";
+import { automaticWriteThrottleSchema, batchRunSchema, extensionSettingsSchema, scanPreviewSchema } from "./domain/messages";
+import type { AutomaticWriteThrottle, BatchRun, ExtensionSettings, PlatformKey, ScanPreview } from "./types";
 
 export async function loadSettings(): Promise<ExtensionSettings> {
   const value: unknown = (await chrome.storage.local.get(STORAGE_KEYS.settings))[STORAGE_KEYS.settings];
@@ -15,6 +15,25 @@ export async function saveSettings(settings: ExtensionSettings): Promise<Extensi
   const parsed = extensionSettingsSchema.parse(settings);
   await chrome.storage.local.set({ [STORAGE_KEYS.settings]: parsed });
   return parsed;
+}
+
+export async function getAutomaticWriteThrottle(
+  ownerId: string,
+  platform: PlatformKey
+): Promise<AutomaticWriteThrottle | null> {
+  const value: unknown = (await chrome.storage.local.get(STORAGE_KEYS.automaticWriteThrottle))[STORAGE_KEYS.automaticWriteThrottle];
+  const parsed = automaticWriteThrottleSchema.safeParse(value);
+  if (!parsed.success) return null;
+  return parsed.data.ownerId === ownerId && parsed.data.platform === platform ? parsed.data : null;
+}
+
+export async function saveAutomaticWriteThrottle(throttle: AutomaticWriteThrottle): Promise<void> {
+  const parsed = automaticWriteThrottleSchema.parse(throttle);
+  await chrome.storage.local.set({ [STORAGE_KEYS.automaticWriteThrottle]: parsed });
+}
+
+export async function clearAutomaticWriteThrottle(): Promise<void> {
+  await chrome.storage.local.remove(STORAGE_KEYS.automaticWriteThrottle);
 }
 
 interface StoredKey {
@@ -96,7 +115,8 @@ export async function ensureDeviceOwner(userId: string): Promise<void> {
   await chrome.storage.local.remove([
     STORAGE_KEYS.settings,
     STORAGE_KEYS.run,
-    STORAGE_KEYS.scanPreview
+    STORAGE_KEYS.scanPreview,
+    STORAGE_KEYS.automaticWriteThrottle
   ]);
   await chrome.storage.local.set({ [STORAGE_KEYS.deviceOwner]: userId });
 }
@@ -107,6 +127,7 @@ export async function clearDeviceOwner(): Promise<void> {
     STORAGE_KEYS.deviceOwner,
     STORAGE_KEYS.settings,
     STORAGE_KEYS.run,
-    STORAGE_KEYS.scanPreview
+    STORAGE_KEYS.scanPreview,
+    STORAGE_KEYS.automaticWriteThrottle
   ]);
 }

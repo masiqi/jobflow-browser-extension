@@ -63,6 +63,18 @@ const STATUS_LABELS: Record<string, string> = {
   failed: "处理失败"
 };
 
+const POLICY_LABELS: Record<ExtensionSettings["executionPolicy"], string> = {
+  draft_only: "仅生成",
+  reviewed_send: "逐条确认",
+  automatic_send: "自动投递"
+};
+
+const POLICY_STATUS: Record<ExtensionSettings["executionPolicy"], { title: string; note: string }> = {
+  draft_only: { title: "仅生成草稿", note: "当前禁止猎聘真实写入" },
+  reviewed_send: { title: "逐条确认发送", note: "仅管理台可执行真实写入" },
+  automatic_send: { title: "选中批次自动投递", note: "仅侧边栏一键按钮授权本批" }
+};
+
 function navMarkup(): string {
   const entries: Array<[ViewName, string]> = [
     ["records", "职位记录"],
@@ -95,8 +107,18 @@ function accountView(state: AppState): string {
     '<dt>模型权益</dt><dd>' + (state.auth.vip ? "VIP 托管模型" : "BYOK") + '</dd></dl>',
     '<label class="check"><input id="launcherVisible" type="checkbox" ' + (state.settings.launcherVisible ? "checked" : "")
       + '><span>在猎聘页面显示侧边栏入口</span></label>',
+    '<fieldset class="segmented execution-policy"><legend>执行策略</legend>',
+    (Object.entries(POLICY_LABELS) as Array<[ExtensionSettings["executionPolicy"], string]>).map(([value, label]) =>
+      '<label><input type="radio" name="executionPolicy" value="' + value + '" '
+      + (state.settings.executionPolicy === value ? "checked" : "") + '><span>' + label + "</span></label>"
+    ).join(""),
+    '</fieldset>',
     '<label class="daily-limit">猎聘每日投递上限<input id="dailySendLimit" type="number" min="1" max="500" step="1" value="'
       + String(state.settings.dailySendLimit) + '"></label>',
+    '<div class="form-grid"><label>自动投递最小间隔<input id="automaticSendDelayMinSeconds" type="number" min="5" max="600" step="1" value="'
+      + String(state.settings.automaticSendDelayMinSeconds) + '"></label>',
+    '<label>自动投递最大间隔<input id="automaticSendDelayMaxSeconds" type="number" min="5" max="600" step="1" value="'
+      + String(state.settings.automaticSendDelayMaxSeconds) + '"></label></div>',
     '<div class="actions"><button data-action="save-interface">保存界面设置</button><button data-action="logout">退出登录</button>',
     '<button class="danger-quiet" data-action="delete-my-data">删除我的求职数据</button></div>'
   ].join("");
@@ -275,7 +297,8 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
     .filter((revision) => revision.text === draft.currentText)
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
   const retryableDeliveryStatuses = new Set(["ready", "awaiting_confirmation", "partial", "failed", "review_required"]);
-  const canPrepareReviewedSend = record.status === "draft_ready"
+  const canPrepareReviewedSend = state.settings.executionPolicy !== "draft_only"
+    && record.status === "draft_ready"
     && Boolean(draft && latestRevision)
     && (!delivery || retryableDeliveryStatuses.has(delivery.overallStatus));
   const retryBusy = Boolean(storedRetryBusyOpportunityId);
@@ -283,6 +306,9 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
   const reviewedBusy = reviewedSendBusyOpportunityId === record.id;
   const reviewedPrepared = reviewedSendPreparedOpportunityId === record.id;
   const reviewedFeedback = reviewedSendFeedback.opportunityId === record.id ? reviewedSendFeedback : null;
+  const draftOnlyLiveBlocked = state.settings.executionPolicy === "draft_only"
+    && record.status === "draft_ready"
+    && Boolean(draft);
   return [
     '<div class="detail-heading"><div><span class="badge ' + escapeHtml(record.status) + '">'
       + escapeHtml(STATUS_LABELS[record.status] || record.status) + '</span><h3>' + escapeHtml(record.title)
@@ -327,14 +353,16 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
         '<div class="revision"><b>' + (revision.kind === "generated" ? "模型生成" : "用户编辑")
         + '</b><time>' + escapeHtml(formatTime(revision.createdAt)) + '</time><p>' + escapeHtml(revision.text) + "</p></div>"
       ).join("") + "</details></div>" : "",
-    delivery || canPrepareReviewedSend || reviewedFeedback
+    delivery || canPrepareReviewedSend || reviewedFeedback || draftOnlyLiveBlocked
       ? '<div class="detail-section reviewed-send" aria-busy="' + String(reviewedBusy) + '"><h4>人工确认投递并打招呼</h4>'
         + '<dl class="delivery-details"><dt>简历</dt><dd>使用猎聘当前默认简历</dd><dt>投递</dt><dd>'
         + escapeHtml(DELIVERY_COMPONENT_LABELS[delivery?.applicationStatus ?? "pending"] ?? "未知") + '</dd><dt>招呼</dt><dd>'
         + escapeHtml(DELIVERY_COMPONENT_LABELS[delivery?.greetingStatus ?? "pending"] ?? "未知") + '</dd><dt>整体</dt><dd>'
         + escapeHtml(DELIVERY_OVERALL_LABELS[delivery?.overallStatus ?? "ready"] ?? "未知") + '</dd></dl>'
         + (delivery?.latestReason ? '<p class="reviewed-send-status">' + escapeHtml(delivery.latestReason) + "</p>" : "")
-        + '<p class="write-warning">确认后会对招聘网站执行真实写操作。请先打开对应猎聘职位详情页并确认账号状态。</p>'
+        + (draftOnlyLiveBlocked
+          ? '<p class="write-warning">当前为仅生成模式，已隐藏真实投递和打招呼入口。</p>'
+          : '<p class="write-warning">确认后会对招聘网站执行真实写操作。请先打开对应猎聘职位详情页并确认账号状态。</p>')
         + '<div class="actions">'
         + (canPrepareReviewedSend && !reviewedPrepared
           ? '<button class="primary" data-action="prepare-reviewed-send" data-id="' + escapeHtml(record.id)
@@ -383,9 +411,11 @@ async function render(): Promise<void> {
     app.innerHTML = '<div class="fatal">' + escapeHtml(error instanceof Error ? error.message : error) + "</div>";
     return;
   }
+  const policyStatus = POLICY_STATUS[state.settings.executionPolicy];
   app.innerHTML = [
     '<aside><div class="brand"><span>JF</span><div><b>JobFlow</b><small>猎聘草稿助手</small></div></div>',
-    '<nav>', navMarkup(), '</nav><div class="mode"><span></span><div><b>逐条确认发送</b><small>仅管理台可执行真实写入</small></div></div></aside>',
+    '<nav>', navMarkup(), '</nav><div class="mode"><span></span><div><b>' + escapeHtml(policyStatus.title)
+      + '</b><small>' + escapeHtml(policyStatus.note) + '</small></div></div></aside>',
     '<main><header><div><b>' + escapeHtml(state.auth.email || "未登录") + '</b><small>'
       + (state.auth.vip ? "VIP · " : "") + escapeHtml(state.settings.model.route.toUpperCase()) + " · "
       + escapeHtml(state.settings.model.provider) + " / " + escapeHtml(state.settings.model.model)
@@ -466,10 +496,23 @@ function collectModel(settings: ExtensionSettings): ExtensionSettings {
 
 function collectInterface(settings: ExtensionSettings): ExtensionSettings {
   const rawLimit = Number(document.querySelector<HTMLInputElement>("#dailySendLimit")?.value || settings.dailySendLimit);
+  const rawPolicy = document.querySelector<HTMLInputElement>('[name="executionPolicy"]:checked')?.value;
+  const executionPolicy = rawPolicy === "draft_only" || rawPolicy === "automatic_send" ? rawPolicy : "reviewed_send";
+  const minDelay = Number(document.querySelector<HTMLInputElement>("#automaticSendDelayMinSeconds")?.value
+    || settings.automaticSendDelayMinSeconds);
+  const maxDelay = Number(document.querySelector<HTMLInputElement>("#automaticSendDelayMaxSeconds")?.value
+    || settings.automaticSendDelayMaxSeconds);
+  if (!Number.isInteger(minDelay) || !Number.isInteger(maxDelay)
+    || minDelay < 5 || maxDelay > 600 || minDelay > maxDelay) {
+    throw new Error("自动投递随机间隔必须是 5 到 600 秒之间的整数，且最小值不能大于最大值");
+  }
   return {
     ...settings,
+    executionPolicy,
     launcherVisible: checked("launcherVisible"),
-    dailySendLimit: Number.isInteger(rawLimit) && rawLimit >= 1 && rawLimit <= 500 ? rawLimit : settings.dailySendLimit
+    dailySendLimit: Number.isInteger(rawLimit) && rawLimit >= 1 && rawLimit <= 500 ? rawLimit : settings.dailySendLimit,
+    automaticSendDelayMinSeconds: minDelay,
+    automaticSendDelayMaxSeconds: maxDelay
   };
 }
 

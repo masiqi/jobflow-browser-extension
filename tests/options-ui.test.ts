@@ -212,6 +212,108 @@ describe("resume profile interactions", () => {
     expect(chrome.tabs.create).not.toHaveBeenCalled();
   });
 
+  it("saves execution policy and automatic delay settings from the account page", async () => {
+    const state = appState(profile());
+    state.settings.executionPolicy = "reviewed_send";
+    state.settings.automaticSendDelayMinSeconds = 10;
+    state.settings.automaticSendDelayMaxSeconds = 20;
+    const sendMessage = vi.fn(async (request: { type: string; settings?: AppState["settings"] }) => {
+      if (request.type === "GET_APP_STATE") return { ok: true, data: state };
+      if (request.type === "UPDATE_SETTINGS" && request.settings) state.settings = request.settings;
+      return { ok: true, data: request };
+    });
+    vi.stubGlobal("chrome", { runtime: { sendMessage }, tabs: { create: vi.fn() } });
+
+    await import("../src/options");
+    await vi.waitFor(() => expect(document.querySelector('[data-view="account"]')).not.toBeNull());
+    (document.querySelector('[data-view="account"]') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(document.querySelector('[name="executionPolicy"][value="reviewed_send"]')).not.toBeNull());
+    expect(document.querySelector("#executionPolicy")).toBeNull();
+    expect((document.querySelector('[name="executionPolicy"][value="reviewed_send"]') as HTMLInputElement).checked).toBe(true);
+
+    (document.querySelector('[name="executionPolicy"][value="automatic_send"]') as HTMLInputElement).click();
+    expect((document.querySelector('[name="executionPolicy"][value="automatic_send"]') as HTMLInputElement).checked).toBe(true);
+    (document.querySelector("#automaticSendDelayMinSeconds") as HTMLInputElement).value = "12";
+    (document.querySelector("#automaticSendDelayMaxSeconds") as HTMLInputElement).value = "34";
+    (document.querySelector('[data-action="save-interface"]') as HTMLButtonElement).click();
+
+    await vi.waitFor(() => expect(sendMessage.mock.calls.some(([request]) => request.type === "UPDATE_SETTINGS")).toBe(true));
+    expect(sendMessage.mock.calls.find(([request]) => request.type === "UPDATE_SETTINGS")?.[0])
+      .toMatchObject({
+        settings: {
+          executionPolicy: "automatic_send",
+          automaticSendDelayMinSeconds: 12,
+          automaticSendDelayMaxSeconds: 34
+        }
+      });
+    await vi.waitFor(() => expect(document.querySelector(".mode")?.textContent).toContain("选中批次自动投递"));
+    expect(document.querySelector(".mode")?.textContent).toContain("仅侧边栏一键按钮授权本批");
+  });
+
+  it("rejects invalid automatic delay settings without saving", async () => {
+    const state = appState(profile());
+    const sendMessage = vi.fn(async (request: { type: string }) =>
+      request.type === "GET_APP_STATE" ? { ok: true, data: state } : { ok: true });
+    vi.stubGlobal("chrome", { runtime: { sendMessage }, tabs: { create: vi.fn() } });
+
+    await import("../src/options");
+    await vi.waitFor(() => expect(document.querySelector('[data-view="account"]')).not.toBeNull());
+    (document.querySelector('[data-view="account"]') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(document.querySelector("#automaticSendDelayMinSeconds")).not.toBeNull());
+
+    (document.querySelector("#automaticSendDelayMinSeconds") as HTMLInputElement).value = "40";
+    (document.querySelector("#automaticSendDelayMaxSeconds") as HTMLInputElement).value = "20";
+    (document.querySelector('[data-action="save-interface"]') as HTMLButtonElement).click();
+
+    await vi.waitFor(() => expect(document.querySelector("#toast")?.textContent).toContain("随机间隔"));
+    expect(sendMessage.mock.calls.filter(([request]) => request.type === "UPDATE_SETTINGS")).toHaveLength(0);
+  });
+
+  it("hides manual live send controls when the execution policy is draft-only", async () => {
+    const state = appState(profile());
+    state.settings.executionPolicy = "draft_only";
+    const opportunityId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    state.opportunities = [{
+      id: opportunityId,
+      userId: state.auth.userId!,
+      platform: "liepin",
+      platformJobId: "1980000304",
+      canonicalUrl: "https://www.liepin.com/a/1980000304.shtml",
+      title: "合成 Agent 工程师",
+      company: "合成科技",
+      location: "北京",
+      salary: "30-50k",
+      experience: "3-5年",
+      education: "本科",
+      cardText: "合成职位卡片",
+      description: "岗位职责：负责合成智能体平台研发。",
+      status: "draft_ready",
+      firstSeenAt: "2026-09-11T00:00:00.000Z",
+      lastSeenAt: "2026-09-11T00:00:01.000Z"
+    }];
+    state.drafts = [{
+      opportunityId,
+      currentText: "您好，我关注到这个合成 Agent 岗位，过往做过任务平台和稳定性建设，想进一步沟通匹配度。",
+      revisions: [{
+        id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        kind: "generated",
+        text: "您好，我关注到这个合成 Agent 岗位，过往做过任务平台和稳定性建设，想进一步沟通匹配度。",
+        createdAt: "2026-09-11T00:00:02.000Z",
+        jdEvidence: ["负责合成智能体平台研发"],
+        factIds: ["fact-1"]
+      }],
+      updatedAt: "2026-09-11T00:00:02.000Z"
+    }];
+    const sendMessage = vi.fn(async () => ({ ok: true, data: state }));
+    vi.stubGlobal("chrome", { runtime: { sendMessage }, tabs: { create: vi.fn() } });
+
+    await import("../src/options");
+    await vi.waitFor(() => expect(document.querySelector(".reviewed-send")).not.toBeNull());
+    expect(document.querySelector(".reviewed-send")?.textContent).toContain("当前为仅生成模式");
+    expect(document.querySelector('[data-action="prepare-reviewed-send"]')).toBeNull();
+    expect(document.querySelector('[data-action="confirm-reviewed-send"]')).toBeNull();
+  });
+
   it("retries a failed record from stored details with persistent progress and success", async () => {
     let state = appState(profile());
     state.resumeProfile = { ...state.resumeProfile!, state: "active" };

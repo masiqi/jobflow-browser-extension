@@ -61,6 +61,52 @@ describe("MV3 safety gate", () => {
     expect(backgroundSource).toContain("isTrustedOptionsSender");
   });
 
+  it("allowlists only explicit sidepanel and options paths into live Liepin execution", async () => {
+    const backgroundSource = await readSource("src/background.ts");
+    const messagesSource = await readSource("src/domain/messages.ts");
+    const contentSource = await readSource("src/content/liepin.ts");
+    const sidepanelSource = await readSource("src/sidepanel.ts");
+
+    expect(messagesSource).toContain('type: z.literal("START_BATCH")');
+    expect(messagesSource).toContain("expectedExecutionPolicy: executionPolicySchema");
+    expect(backgroundSource).toContain('isTrustedExtensionPageSender(sender, "sidepanel.html")');
+    expect(backgroundSource).toContain("expectedExecutionPolicy");
+    expect(backgroundSource).toContain('authorizationEvidenceCode: "automatic_batch_authorized"');
+    expect(backgroundSource).toContain("executeReviewedDeliveryCore({");
+    expect(backgroundSource).toContain("guardAutomaticBeforeWrite(");
+
+    expect(backgroundSource).toContain('isTrustedExtensionPageSender(sender, "options.html")');
+    expect(backgroundSource).toContain('case "PREPARE_REVIEWED_SEND"');
+    expect(backgroundSource).toContain('case "CONFIRM_REVIEWED_SEND"');
+
+    expect(contentSource).toContain("CONTENT_REVIEWED_SEND_EXECUTE");
+    expect(contentSource).toContain("liepinReviewedSendExecuteCommandSchema.parse");
+    expect(contentSource).toContain("executeLiepinReviewedSend(");
+    expect(contentSource).not.toContain("CONFIRM_REVIEWED_SEND");
+    expect(contentSource).not.toContain("START_BATCH");
+
+    const scanHandler = backgroundSource.slice(
+      backgroundSource.indexOf("async function scanCurrentTab"),
+      backgroundSource.indexOf("function isTrustedExtensionPageSender")
+    );
+    const settingsHandler = backgroundSource.slice(
+      backgroundSource.indexOf('case "UPDATE_SETTINGS"'),
+      backgroundSource.indexOf('case "AUTH_REGISTER"')
+    );
+    const recoverHandler = backgroundSource.slice(
+      backgroundSource.indexOf("async function recoverRun"),
+      backgroundSource.indexOf("chrome.runtime.onStartup")
+    );
+    for (const source of [scanHandler, settingsHandler, recoverHandler]) {
+      expect(source).not.toContain("executeReviewedDeliveryCore");
+      expect(source).not.toContain("CONTENT_REVIEWED_SEND_EXECUTE");
+      expect(source).not.toContain("markReviewedDeliveryWriteStarted");
+    }
+
+    expect(sidepanelSource).toContain('type: "START_BATCH"');
+    expect(sidepanelSource).toContain("expectedExecutionPolicy: state.settings.executionPolicy");
+  });
+
   it("removes personal assumptions, free-form rules, and environment-specific model hosts", async () => {
     const source = (await Promise.all([
       "src/defaults.ts",

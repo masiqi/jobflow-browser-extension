@@ -171,6 +171,60 @@ button:disabled, input:disabled, textarea:disabled { cursor: not-allowed; opacit
 .stored-retry-status.error { color: #9c342e; }
 .daily-limit { display: block; max-width: 260px; margin: 16px 0 0; color: #53616f; }
 .daily-limit input { display: block; margin-top: 5px; }
+.segmented {
+  max-width: 860px;
+  margin: 18px 0 0;
+  padding: 0;
+  border: 0;
+}
+.segmented legend {
+  margin-bottom: 8px;
+  color: #53616f;
+}
+.segmented.execution-policy {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.segmented.execution-policy label {
+  position: relative;
+  flex: 1 1 150px;
+  min-width: 0;
+}
+.segmented.execution-policy input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+.segmented.execution-policy span {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 10px;
+  border: 1px solid #b9c4ce;
+  border-radius: 5px;
+  background: #fff;
+  color: #233849;
+  overflow-wrap: anywhere;
+}
+.segmented.execution-policy input:checked + span {
+  border-color: #1d6d50;
+  background: #e1f1e8;
+  color: #17633c;
+  font-weight: 650;
+}
+.segmented.execution-policy label:has(input[value="automatic_send"]:checked) span {
+  border-color: #d49322;
+  background: #fff3dc;
+  color: #704810;
+}
+.segmented.execution-policy input:focus-visible + span { outline: 3px solid #eeb94f; outline-offset: 2px; }
 .reviewed-send { background: #fff8e8; margin: 0 -20px; padding: 16px 20px; border-bottom: 1px solid #dce2e7; }
 .delivery-details { display: grid; grid-template-columns: 90px minmax(0, 1fr); margin: 10px 0; }
 .delivery-details dt, .delivery-details dd { margin: 0; padding: 5px 0; }
@@ -211,4 +265,6 @@ details { margin-top: 14px; }
   .record-table { border-right: 0; border-bottom: 1px solid #ccd5dd; max-height: 360px; }
   .import-band { grid-template-columns: 1fr; }
   .import-band span { display: none; }
+  .form-grid, .record-toolbar { grid-template-columns: 1fr; }
+  .segmented.execution-policy label { flex-basis: 100%; }
 }

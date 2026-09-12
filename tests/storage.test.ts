@@ -2,16 +2,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS, STORAGE_KEYS } from "../src/defaults";
 import {
   ensureDeviceOwner,
+  getAutomaticWriteThrottle,
   getByokKey,
   getRun,
   getScanPreview,
   loadSettings,
+  saveAutomaticWriteThrottle,
   saveRun,
   saveScanPreview,
   saveSettings,
   setByokKey
 } from "../src/storage";
-import type { BatchRun, ScanPreview } from "../src/types";
+import type { AutomaticWriteThrottle, BatchRun, ScanPreview } from "../src/types";
 
 function storageArea(values: Map<string, unknown>) {
   return {
@@ -52,6 +54,13 @@ describe("device-owned extension storage", () => {
   it("clears user-scoped device state when the signed-in owner changes", async () => {
     await ensureDeviceOwner("user-a");
     await saveSettings({ ...structuredClone(DEFAULT_SETTINGS), maxJobsPerBatch: 20 });
+    await saveAutomaticWriteThrottle({
+      ownerId: "user-a",
+      platform: "liepin",
+      lastWriteStartedAt: "2026-09-12T00:00:00.000Z",
+      scheduledDelaySeconds: 17,
+      nextWriteEligibleAt: "2026-09-12T00:00:17.000Z"
+    });
     await setByokKey("synthetic-key", false, "user-a");
     local.set(STORAGE_KEYS.run, { id: "old-run" });
     local.set(STORAGE_KEYS.scanPreview, { sourceUrl: "old-preview" });
@@ -61,6 +70,7 @@ describe("device-owned extension storage", () => {
     expect(local.get(STORAGE_KEYS.deviceOwner)).toBe("user-b");
     expect(local.has(STORAGE_KEYS.run)).toBe(false);
     expect(local.has(STORAGE_KEYS.scanPreview)).toBe(false);
+    expect(await getAutomaticWriteThrottle("user-b", "liepin")).toBeNull();
     expect(await getByokKey("user-b")).toBe("");
     expect(await loadSettings()).toEqual(DEFAULT_SETTINGS);
   });
@@ -133,6 +143,9 @@ describe("device-owned extension storage", () => {
 
   it("merges new default settings into legacy persisted settings without clearing model test state", async () => {
     const legacySettings = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+    delete legacySettings.executionPolicy;
+    delete legacySettings.automaticSendDelayMinSeconds;
+    delete legacySettings.automaticSendDelayMaxSeconds;
     delete legacySettings.dailySendLimit;
     legacySettings.model = {
       ...DEFAULT_SETTINGS.model,
@@ -142,11 +155,31 @@ describe("device-owned extension storage", () => {
     local.set(STORAGE_KEYS.settings, legacySettings);
 
     expect(await loadSettings()).toMatchObject({
+      executionPolicy: "reviewed_send",
+      automaticSendDelayMinSeconds: 10,
+      automaticSendDelayMaxSeconds: 20,
       dailySendLimit: 150,
       model: {
         connectionTestedAt: "2026-09-11T00:00:00.000Z",
         testedFingerprint: "synthetic-fingerprint"
       }
     });
+  });
+
+  it("persists only the current owner's Liepin automatic write throttle", async () => {
+    const throttle: AutomaticWriteThrottle = {
+      ownerId: "user-a",
+      platform: "liepin",
+      lastWriteStartedAt: "2026-09-12T00:00:00.000Z",
+      scheduledDelaySeconds: 20,
+      nextWriteEligibleAt: "2026-09-12T00:00:20.000Z"
+    };
+    await saveAutomaticWriteThrottle(throttle);
+
+    expect(await getAutomaticWriteThrottle("user-a", "liepin")).toEqual(throttle);
+    expect(await getAutomaticWriteThrottle("user-b", "liepin")).toBeNull();
+
+    local.set(STORAGE_KEYS.automaticWriteThrottle, { ...throttle, scheduledDelaySeconds: 601 });
+    expect(await getAutomaticWriteThrottle("user-a", "liepin")).toBeNull();
   });
 });

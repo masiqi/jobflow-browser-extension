@@ -24,7 +24,13 @@ header p, small { color: #647180; }
 header small { display: block; max-width: 240px; margin-top: 2px; overflow-wrap: anywhere; }
 section { padding: 14px; border-bottom: 1px solid #d8dee6; background: #fff; }
 .status-band { display: flex; gap: 10px; align-items: center; background: #edf7f0; color: #185d36; }
-.status-band small { display: block; color: #347452; margin-top: 2px; }
+.status-band small { display: block; color: #347452; margin-top: 2px; overflow-wrap: anywhere; }
+.status-band.policy-reviewed_send { background: #edf4f7; color: #244f66; }
+.status-band.policy-reviewed_send small { color: #44687b; }
+.status-band.policy-reviewed_send .dot { background: #386f8a; }
+.status-band.policy-automatic_send { background: #fff3dc; color: #704810; border-left: 4px solid #d49322; }
+.status-band.policy-automatic_send small { color: #805a1d; }
+.status-band.policy-automatic_send .dot { background: #d49322; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: #2f8f58; flex: 0 0 auto; }
 .section-title { min-height: 32px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 #scan-actions { display: flex; align-items: center; }
@@ -74,12 +80,13 @@ section { padding: 14px; border-bottom: 1px solid #d8dee6; background: #fff; }
 .candidate.disabled { opacity: .48; background: #f3f5f7; }
 .candidate b, .record b { display: block; overflow-wrap: anywhere; }
 .candidate small, .record small { display: block; margin-top: 3px; overflow-wrap: anywhere; }
-.batch-row { min-height: 50px; display: flex; align-items: end; justify-content: space-between; gap: 10px; margin-top: 10px; }
+.batch-row { min-height: 50px; display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 10px; margin-top: 10px; }
 .batch-row label { color: #65717f; }
 .batch-row input { display: block; width: 74px; height: 32px; margin-top: 4px; border: 1px solid #bbc5cf; border-radius: 5px; padding: 0 8px; }
-.batch-start { display: flex; align-items: end; gap: 9px; }
+.batch-start { display: flex; flex: 1 1 190px; min-width: 0; align-items: end; justify-content: flex-end; gap: 9px; }
 .batch-start small { min-width: 88px; padding-bottom: 8px; text-align: right; white-space: nowrap; }
 button.primary { min-height: 34px; border: 0; border-radius: 5px; background: #1d6d50; color: #fff; padding: 7px 14px; font-weight: 650; cursor: pointer; }
+button.primary.automatic-action { background: #a8660d; box-shadow: inset 0 0 0 1px #8b5408; }
 button.primary:disabled { opacity: .45; cursor: default; }
 .progress { height: 6px; border-radius: 3px; overflow: hidden; background: #e4e8ed; margin: 8px 0; }
 .progress span { display: block; height: 100%; background: #318060; }
@@ -87,6 +94,16 @@ button.primary:disabled { opacity: .45; cursor: default; }
 .run-current { margin-top: 10px; padding: 9px 0; border-top: 1px solid #dce2e9; }
 .run-current b, .run-current span { display: block; overflow-wrap: anywhere; }
 .run-current span { margin-top: 3px; color: #315f78; }
+.run-pause-reason,
+.run-wait {
+  padding: 8px 9px;
+  border-radius: 5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.run-pause-reason { color: #8d3a1c; background: #fff0e8; border: 1px solid #edcab9; }
+.run-wait { color: #315066; background: #e8f0f4; border: 1px solid #c8d6df; }
+.run-wait span { font-variant-numeric: tabular-nums; font-weight: 700; }
 .run-failures { margin-top: 10px; border-top: 1px solid #e5c2bf; }
 .run-failure { padding: 8px 0; color: #8e332e; }
 .run-failure b, .run-failure span { display: block; overflow-wrap: anywhere; }
@@ -102,3 +119,11 @@ button.primary:disabled { opacity: .45; cursor: default; }
 .error, #toast { margin: 12px; color: #9f332d; background: #fff0ef; border: 1px solid #edc0bc; padding: 10px; border-radius: 5px; }
 #toast:empty { display: none; }
 .link-button { border: 0; background: transparent; color: #1b628f; cursor: pointer; padding: 5px; }
+@media (max-width: 340px) {
+  body { min-width: 0; }
+  header, section { padding-left: 10px; padding-right: 10px; }
+  .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .batch-start { flex-basis: 100%; justify-content: space-between; }
+  .batch-start small { text-align: left; }
+  #start { flex: 1 1 auto; min-width: 0; white-space: normal; }
+}

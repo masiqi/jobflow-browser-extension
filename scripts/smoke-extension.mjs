@@ -10,6 +10,23 @@ await mkdir(artifactDirectory, { recursive: true });
 const errors = [];
 let context;
 
+async function describeHorizontalOverflow(page) {
+  return page.locator("body *").evaluateAll((elements) => elements
+    .map((element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        tag: element.tagName.toLowerCase(),
+        className: element.className || "",
+        left: Math.round(rect.left),
+        right: Math.round(rect.right),
+        scrollWidth: element.scrollWidth,
+        clientWidth: element.clientWidth
+      };
+    })
+    .filter((item) => item.right > window.innerWidth + 1 || item.scrollWidth > item.clientWidth + 1)
+    .slice(0, 6));
+}
+
 try {
   context = await chromium.launchPersistentContext(profileDirectory, {
     headless: false,
@@ -35,6 +52,27 @@ try {
     path: join(artifactDirectory, "dashboard-account.png"),
     fullPage: true
   });
+  const automaticPolicy = page.locator('label:has(input[name="executionPolicy"][value="automatic_send"])');
+  await automaticPolicy.locator("span").click();
+  if (!(await automaticPolicy.locator("input").isChecked())) {
+    throw new Error("Automatic execution policy did not become selected");
+  }
+  await page.getByRole("button", { name: "保存界面设置" }).click();
+  await page.getByText("已保存", { exact: true }).waitFor();
+  await page.screenshot({
+    path: join(artifactDirectory, "dashboard-account-automatic.png"),
+    fullPage: true
+  });
+  await page.setViewportSize({ width: 760, height: 900 });
+  if (await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)) {
+    throw new Error("Automatic settings page has horizontal overflow at 760px: "
+      + JSON.stringify(await describeHorizontalOverflow(page)));
+  }
+  await page.screenshot({
+    path: join(artifactDirectory, "dashboard-account-automatic-narrow.png"),
+    fullPage: true
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
   await page.getByRole("button", { name: "模型服务" }).click();
   await page.getByRole("heading", { name: "模型服务" }).waitFor();
   await page.screenshot({
@@ -55,13 +93,26 @@ try {
   await sidePanel.setViewportSize({ width: 380, height: 800 });
   await sidePanel.goto("chrome-extension://" + extensionId + "/sidepanel.html");
   await sidePanel.getByRole("heading", { name: "JobFlow" }).waitFor();
-  await sidePanel.getByText("草稿与筛选").waitFor();
-  await sidePanel.getByText("真实发送仅在管理台逐条确认").waitFor();
+  await sidePanel.getByText("自动投递", { exact: true }).waitFor();
+  await sidePanel.getByText(/随机间隔 10-20 秒/).waitFor();
+  const automaticStart = sidePanel.getByRole("button", { name: "一键投递并打招呼 0 个职位" });
+  await automaticStart.waitFor();
+  if (!(await automaticStart.isDisabled())) {
+    throw new Error("Automatic submit action must remain disabled before a scan and selection");
+  }
   if (await sidePanel.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)) {
     throw new Error("Side panel has horizontal overflow");
   }
   await sidePanel.screenshot({
     path: join(artifactDirectory, "sidepanel.png"),
+    fullPage: true
+  });
+  await sidePanel.setViewportSize({ width: 320, height: 800 });
+  if (await sidePanel.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)) {
+    throw new Error("Automatic side panel has horizontal overflow at 320px");
+  }
+  await sidePanel.screenshot({
+    path: join(artifactDirectory, "sidepanel-automatic-narrow.png"),
     fullPage: true
   });
 

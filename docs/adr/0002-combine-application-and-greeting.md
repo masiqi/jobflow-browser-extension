@@ -30,6 +30,8 @@ When Liepin exposes a native combined operation, the adapter should prefer it on
 
 This decision did not authorize the original draft-only milestone. The separately approved single-opportunity reviewed-send amendment in ADR 0001 now activates it only through explicit management-page confirmation.
 
+The separately approved selected-batch automatic mode also uses this same command. It does not introduce an “only send greeting” shortcut: each automatic opportunity still records application and greeting evidence independently, consumes quota only at the write boundary, preserves verified components, and treats partial or ambiguous post-write outcomes as review-required recovery through the reviewed-send path.
+
 ## Consequences
 
 - The outbox action should be labeled “投递并打招呼” rather than the ambiguous “发送.”

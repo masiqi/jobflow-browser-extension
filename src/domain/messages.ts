@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 const platformSchema = z.literal("liepin");
+export const executionPolicySchema = z.enum(["draft_only", "reviewed_send", "automatic_send"]);
 
 export const listCandidateSchema = z.object({
   platform: platformSchema,
@@ -66,8 +67,15 @@ const batchItemSchema = z.object({
   candidate: listCandidateSchema,
   status: z.enum([
     "queued", "opening", "extracting", "evaluating", "generating",
-    "draft_ready", "excluded", "review_required", "failed"
+    "draft_ready", "delivery_ready", "waiting_interval", "delivery_preflighting",
+    "delivery_in_progress", "delivery_succeeded", "delivery_partial", "blocked",
+    "excluded", "review_required", "failed"
   ]),
+  opportunityId: z.string().uuid().optional(),
+  draftRevisionId: z.string().uuid().optional(),
+  draftSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  blockerPhase: z.enum(["pre_write", "post_write"]).optional(),
+  blockerCode: z.string().max(80).optional(),
   filter: filterDecisionSchema.optional(),
   suitability: suitabilityDecisionSchema.optional(),
   error: z.string().optional(),
@@ -83,6 +91,8 @@ export const batchRunSchema = z.object({
   platform: z.literal("liepin"),
   status: z.enum(["queued", "running", "paused", "completed", "cancelled", "failed"]),
   sourceUrl: z.string().url(),
+  executionPolicy: executionPolicySchema,
+  authorizedAt: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),
   currentIndex: z.number().int().nonnegative(),
@@ -90,7 +100,11 @@ export const batchRunSchema = z.object({
   draftCount: z.number().int().nonnegative(),
   excludedCount: z.number().int().nonnegative(),
   reviewCount: z.number().int().nonnegative(),
-  failedCount: z.number().int().nonnegative()
+  failedCount: z.number().int().nonnegative(),
+  deliverySucceededCount: z.number().int().nonnegative(),
+  deliveryPartialCount: z.number().int().nonnegative(),
+  pauseReason: z.string().max(200).optional(),
+  nextWriteEligibleAt: z.string().optional()
 }).strict();
 
 const ruleSettingsSchema = z.object({
@@ -121,10 +135,24 @@ const modelSettingsSchema = z.object({
 export const extensionSettingsSchema = z.object({
   rules: ruleSettingsSchema,
   model: modelSettingsSchema,
+  executionPolicy: executionPolicySchema,
   maxJobsPerBatch: z.number().int().min(1).max(20),
   dailySendLimit: z.number().int().min(1).max(500),
+  automaticSendDelayMinSeconds: z.number().int().min(5).max(600),
+  automaticSendDelayMaxSeconds: z.number().int().min(5).max(600),
   detailTimeoutSeconds: z.number().int().min(15).max(180),
   launcherVisible: z.boolean()
+}).strict().refine((settings) => settings.automaticSendDelayMinSeconds <= settings.automaticSendDelayMaxSeconds, {
+  message: "automatic send minimum delay must be less than or equal to maximum delay",
+  path: ["automaticSendDelayMaxSeconds"]
+});
+
+export const automaticWriteThrottleSchema = z.object({
+  ownerId: z.string().min(1).max(128),
+  platform: z.literal("liepin"),
+  lastWriteStartedAt: z.string(),
+  scheduledDelaySeconds: z.number().int().min(5).max(600),
+  nextWriteEligibleAt: z.string()
 }).strict();
 
 const reviewedSendIdentitySchema = z.object({
@@ -178,7 +206,11 @@ export const runtimeRequestSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("GET_LAUNCHER_VISIBILITY") }).strict(),
   z.object({ type: z.literal("CONTENT_SCAN") }).strict(),
   z.object({ type: z.literal("SCAN_CURRENT_TAB") }).strict(),
-  z.object({ type: z.literal("START_BATCH"), selectedJobIds: z.array(z.string().min(1).max(128)).min(1).max(20) }).strict(),
+  z.object({
+    type: z.literal("START_BATCH"),
+    selectedJobIds: z.array(z.string().min(1).max(128)).min(1).max(20),
+    expectedExecutionPolicy: executionPolicySchema
+  }).strict(),
   z.object({ type: z.literal("PAUSE_BATCH") }).strict(),
   z.object({ type: z.literal("RESUME_BATCH") }).strict(),
   z.object({ type: z.literal("CANCEL_BATCH") }).strict(),

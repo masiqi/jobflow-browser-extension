@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
 import { DEFAULT_SETTINGS } from "../src/defaults";
-import { decodeRuntimeRequest, extensionSettingsSchema, liepinReviewedSendExecuteCommandSchema } from "../src/domain/messages";
+import {
+  decodeRuntimeRequest,
+  executionPolicySchema,
+  extensionSettingsSchema,
+  liepinReviewedSendExecuteCommandSchema
+} from "../src/domain/messages";
 import { normalizeChatCompletionsEndpoint } from "../src/llm";
 
 describe("runtime and endpoint contracts", () => {
@@ -27,11 +32,16 @@ describe("runtime and endpoint contracts", () => {
     expect(postDetail).not.toContain("chrome.tabs");
   });
 
-  it("accepts only the draft-only batch command shape", () => {
+  it("binds batch start to an explicit expected execution policy", () => {
     expect(decodeRuntimeRequest({
       type: "START_BATCH",
-      selectedJobIds: ["one", "two"]
+      selectedJobIds: ["one", "two"],
+      expectedExecutionPolicy: "automatic_send"
     }).type).toBe("START_BATCH");
+    expect(() => decodeRuntimeRequest({
+      type: "START_BATCH",
+      selectedJobIds: ["one"]
+    })).toThrow();
     expect(() => decodeRuntimeRequest({
       type: "START_BATCH",
       selectedJobIds: ["one"],
@@ -39,7 +49,8 @@ describe("runtime and endpoint contracts", () => {
     })).toThrow();
     expect(() => decodeRuntimeRequest({
       type: "START_BATCH",
-      selectedJobIds: Array.from({ length: 21 }, (_, index) => String(index))
+      selectedJobIds: Array.from({ length: 21 }, (_, index) => String(index)),
+      expectedExecutionPolicy: "reviewed_send"
     })).toThrow();
   });
 
@@ -96,8 +107,8 @@ describe("runtime and endpoint contracts", () => {
   it("rechecks preflight and records both attempts before the reviewed platform command", async () => {
     const source = await readFile("src/background.ts", "utf8");
     const handler = source.slice(
-      source.indexOf("async function confirmReviewedSend"),
-      source.indexOf("async function handleReviewDecision")
+      source.indexOf("async function executeReviewedDeliveryCore"),
+      source.indexOf("async function prepareReviewedSend")
     );
     const finalPreflight = handler.indexOf('type: "CONTENT_REVIEWED_SEND_PREFLIGHT"');
     const reserve = handler.indexOf("reserveReviewedDeliveryQuota(");
@@ -112,14 +123,49 @@ describe("runtime and endpoint contracts", () => {
     expect(applicationAttempt).toBeLessThan(execute);
     expect(greetingAttempt).toBeLessThan(execute);
     expect(handler).toContain("releaseReviewedDeliveryQuota(");
-    expect(handler).toContain("reviewedSendLeases.delete(opportunityId)");
+    const confirm = source.slice(
+      source.indexOf("async function confirmReviewedSend"),
+      source.indexOf("async function handleReviewDecision")
+    );
+    expect(confirm).toContain("reviewedSendLeases.delete(opportunityId)");
   });
 
   it("rejects legacy free-form settings", () => {
     expect(extensionSettingsSchema.parse(DEFAULT_SETTINGS)).toEqual(DEFAULT_SETTINGS);
+    expect(executionPolicySchema.parse("draft_only")).toBe("draft_only");
+    expect(executionPolicySchema.parse("reviewed_send")).toBe("reviewed_send");
+    expect(executionPolicySchema.parse("automatic_send")).toBe("automatic_send");
     expect(() => extensionSettingsSchema.parse({
       ...DEFAULT_SETTINGS,
       customExcludeAny: ["synthetic"]
+    })).toThrow();
+  });
+
+  it("requires valid automatic-send interval settings", () => {
+    expect(extensionSettingsSchema.parse({
+      ...DEFAULT_SETTINGS,
+      executionPolicy: "automatic_send",
+      automaticSendDelayMinSeconds: 5,
+      automaticSendDelayMaxSeconds: 600
+    })).toMatchObject({
+      executionPolicy: "automatic_send",
+      automaticSendDelayMinSeconds: 5,
+      automaticSendDelayMaxSeconds: 600
+    });
+    expect(() => extensionSettingsSchema.parse({
+      ...DEFAULT_SETTINGS,
+      automaticSendDelayMinSeconds: 4,
+      automaticSendDelayMaxSeconds: 20
+    })).toThrow();
+    expect(() => extensionSettingsSchema.parse({
+      ...DEFAULT_SETTINGS,
+      automaticSendDelayMinSeconds: 10.5,
+      automaticSendDelayMaxSeconds: 20
+    })).toThrow();
+    expect(() => extensionSettingsSchema.parse({
+      ...DEFAULT_SETTINGS,
+      automaticSendDelayMinSeconds: 30,
+      automaticSendDelayMaxSeconds: 20
     })).toThrow();
   });
 

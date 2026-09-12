@@ -42,8 +42,11 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
     model: MODEL_PROVIDER_PRESETS.openai.defaultModel,
     rememberKey: false
   },
+  executionPolicy: "reviewed_send",
   maxJobsPerBatch: 10,
   dailySendLimit: 150,
+  automaticSendDelayMinSeconds: 10,
+  automaticSendDelayMaxSeconds: 20,
   detailTimeoutSeconds: 90,
   launcherVisible: true
 };
@@ -52,6 +55,7 @@ export const STORAGE_KEYS = {
   settings: "jobflow.settings.v2",
   run: "jobflow.run.v2",
   scanPreview: "jobflow.scanPreview.v2",
+  automaticWriteThrottle: "jobflow.automaticWriteThrottle.v1",
   sessionKey: "jobflow.byok.session.v2",
   rememberedKey: "jobflow.byok.remembered.v2",
   deviceOwner: "jobflow.deviceOwner.v2",

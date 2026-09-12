@@ -16,6 +16,7 @@ export type OpportunityStatus =
   | "user_excluded"
   | "failed";
 export type BatchStatus = "queued" | "running" | "paused" | "completed" | "cancelled" | "failed";
+export type ExecutionPolicy = "draft_only" | "reviewed_send" | "automatic_send";
 export type BatchItemStatus =
   | "queued"
   | "opening"
@@ -23,6 +24,13 @@ export type BatchItemStatus =
   | "evaluating"
   | "generating"
   | "draft_ready"
+  | "delivery_ready"
+  | "waiting_interval"
+  | "delivery_preflighting"
+  | "delivery_in_progress"
+  | "delivery_succeeded"
+  | "delivery_partial"
+  | "blocked"
   | "excluded"
   | "review_required"
   | "failed";
@@ -93,8 +101,11 @@ export interface JdRuleSettings {
 export interface ExtensionSettings {
   rules: JdRuleSettings;
   model: ModelRouteSettings;
+  executionPolicy: ExecutionPolicy;
   maxJobsPerBatch: number;
   dailySendLimit: number;
+  automaticSendDelayMinSeconds: number;
+  automaticSendDelayMaxSeconds: number;
   detailTimeoutSeconds: number;
   launcherVisible: boolean;
 }
@@ -275,6 +286,11 @@ export interface OpportunityEvent {
 export interface BatchItem {
   candidate: ListCandidate;
   status: BatchItemStatus;
+  opportunityId?: string;
+  draftRevisionId?: string;
+  draftSha256?: string;
+  blockerPhase?: "pre_write" | "post_write";
+  blockerCode?: string;
   filter?: FilterDecision;
   suitability?: SuitabilityDecision;
   error?: string;
@@ -290,6 +306,8 @@ export interface BatchRun {
   platform: PlatformKey;
   status: BatchStatus;
   sourceUrl: string;
+  executionPolicy: ExecutionPolicy;
+  authorizedAt: string;
   createdAt: string;
   updatedAt: string;
   currentIndex: number;
@@ -298,6 +316,18 @@ export interface BatchRun {
   excludedCount: number;
   reviewCount: number;
   failedCount: number;
+  deliverySucceededCount: number;
+  deliveryPartialCount: number;
+  pauseReason?: string;
+  nextWriteEligibleAt?: string;
+}
+
+export interface AutomaticWriteThrottle {
+  ownerId: string;
+  platform: PlatformKey;
+  lastWriteStartedAt: string;
+  scheduledDelaySeconds: number;
+  nextWriteEligibleAt: string;
 }
 
 export interface AuthProjection {

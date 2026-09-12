@@ -33,18 +33,45 @@ const ITEM_STATUS_LABELS: Record<BatchRun["items"][number]["status"], string> = 
   evaluating: "正在调用模型评估",
   generating: "正在生成招呼语",
   draft_ready: "草稿已生成",
+  delivery_ready: "等待投递",
+  waiting_interval: "等待随机间隔",
+  delivery_preflighting: "投递前检查",
+  delivery_in_progress: "正在真实投递",
+  delivery_succeeded: "投递并打招呼完成",
+  delivery_partial: "投递结果需复核",
+  blocked: "批次已阻塞",
   excluded: "已排除",
   review_required: "需要人工复核",
   failed: "处理失败"
+};
+
+const POLICY_LABELS: Record<AppState["settings"]["executionPolicy"], { title: string; note: string; button: string }> = {
+  draft_only: {
+    title: "仅生成",
+    note: "本批只生成草稿，不执行猎聘真实写入",
+    button: "开始生成"
+  },
+  reviewed_send: {
+    title: "逐条确认",
+    note: "本批只生成草稿，后续在管理台逐条确认",
+    button: "开始生成"
+  },
+  automatic_send: {
+    title: "自动投递",
+    note: "匹配职位将自动投递并打招呼",
+    button: "一键投递并打招呼"
+  }
 };
 
 const appElement = document.querySelector<HTMLDivElement>("#app");
 if (!appElement) throw new Error("侧边栏根节点不存在");
 const app: HTMLDivElement = appElement;
 let scanBusy = false;
+let startBusy = false;
 let scanFeedback: ScanFeedback = { kind: "idle", message: "" };
 let selectedJobIds: Set<string> | null = null;
 let selectedSourceUrl = "";
+let waitCountdownTimer: number | null = null;
 
 function iconButton(
   id: string,
@@ -131,13 +158,22 @@ function runMarkup(run: BatchRun | null): string {
   if (!run) return '<p class="empty">尚未运行批次。</p>';
   const failures = run.items.filter((item) => item.status === "failed" && item.error);
   const currentItem = run.items[run.currentIndex];
+  const waitSeconds = run.nextWriteEligibleAt
+    ? Math.max(0, Math.ceil((new Date(run.nextWriteEligibleAt).getTime() - Date.now()) / 1000))
+    : null;
   return [
     '<div class="run"><div class="progress"><span style="width:',
     String(Math.round(run.currentIndex / Math.max(1, run.items.length) * 100)),
     '%"></span></div><p><b>', escapeHtml(BATCH_STATUS_LABELS[run.status]), "</b> · ",
     String(run.currentIndex), "/", String(run.items.length),
     '</p><small>草稿 ', String(run.draftCount), " · 排除 ", String(run.excludedCount),
-    " · 复核 ", String(run.reviewCount), " · 失败 ", String(run.failedCount), "</small>",
+    " · 复核 ", String(run.reviewCount), " · 失败 ", String(run.failedCount),
+    " · 已投递 ", String(run.deliverySucceededCount), " · 待复核投递 ", String(run.deliveryPartialCount), "</small>",
+    run.pauseReason ? '<p class="run-pause-reason">暂停原因：' + escapeHtml(run.pauseReason) + "</p>" : "",
+    waitSeconds !== null && run.nextWriteEligibleAt
+      ? '<p class="run-wait" aria-live="polite">距离下一次 JobFlow 投递约 <span data-next-write-at="'
+        + escapeHtml(run.nextWriteEligibleAt) + '">' + String(waitSeconds) + "</span> 秒</p>"
+      : "",
     currentItem ? '<div class="run-current"><b>' + escapeHtml(currentItem.candidate.title) + '</b><span>'
       + escapeHtml(ITEM_STATUS_LABELS[currentItem.status]) + "</span></div>" : "",
     failures.length ? '<div class="run-failures">' + failures.map((item) =>
@@ -146,6 +182,34 @@ function runMarkup(run: BatchRun | null): string {
     ).join("") + "</div>" : "",
     "</div>"
   ].join("");
+}
+
+function clearWaitCountdownTimer(): void {
+  if (waitCountdownTimer !== null) {
+    window.clearInterval(waitCountdownTimer);
+    waitCountdownTimer = null;
+  }
+}
+
+function updateWaitCountdownText(): void {
+  const countdown = document.querySelector<HTMLElement>("[data-next-write-at]");
+  if (!countdown) {
+    clearWaitCountdownTimer();
+    return;
+  }
+  const waitUntil = new Date(countdown.dataset.nextWriteAt || "").getTime();
+  if (!Number.isFinite(waitUntil)) {
+    clearWaitCountdownTimer();
+    return;
+  }
+  countdown.textContent = String(Math.max(0, Math.ceil((waitUntil - Date.now()) / 1000)));
+}
+
+function configureWaitCountdownTimer(): void {
+  clearWaitCountdownTimer();
+  if (!document.querySelector("[data-next-write-at]")) return;
+  updateWaitCountdownText();
+  waitCountdownTimer = window.setInterval(updateWaitCountdownText, 1000);
 }
 
 function recordsMarkup(records: OpportunityRecord[], deliveries: DeliveryRecord[]): string {
@@ -174,7 +238,13 @@ async function render(): Promise<void> {
   const batchActive = run?.status === "running" || run?.status === "paused" || run?.status === "queued";
   const selectionWithinLimit = selectedCount > 0
     && selectedCount <= state.settings.maxJobsPerBatch
-    && !batchActive;
+    && !batchActive
+    && !startBusy;
+  const policy = POLICY_LABELS[state.settings.executionPolicy];
+  const delayRange = state.settings.automaticSendDelayMinSeconds + "-" + state.settings.automaticSendDelayMaxSeconds + " 秒";
+  const startLabel = state.settings.executionPolicy === "automatic_send" && !batchActive
+    ? policy.button + " " + selectedCount + " 个职位"
+    : batchActive ? "批次进行中" : policy.button;
   app.innerHTML = [
     '<header><div><h1>JobFlow</h1><p>',
     state.auth.status === "signed_in"
@@ -183,7 +253,10 @@ async function render(): Promise<void> {
     '</p><small>' + escapeHtml(state.settings.model.route.toUpperCase()) + " · "
       + escapeHtml(state.settings.model.provider) + " / " + escapeHtml(state.settings.model.model)
       + '</small></div><div id="header-actions"></div></header>',
-    '<section class="status-band"><span class="dot"></span><div><b>草稿与筛选</b><small>真实发送仅在管理台逐条确认</small></div></section>',
+    '<section class="status-band policy-' + escapeHtml(state.settings.executionPolicy) + '"><span class="dot"></span><div><b>' + escapeHtml(policy.title)
+      + '</b><small>' + escapeHtml(policy.note)
+      + (state.settings.executionPolicy === "automatic_send" ? " · 随机间隔 " + escapeHtml(delayRange) : "")
+      + '</small></div></section>',
     '<section><div class="section-title"><h2>当前结果</h2><div id="scan-actions"></div></div>',
     '<div id="scanStatus" class="scan-status ' + escapeHtml(scanFeedback.kind)
       + '" role="status" aria-live="polite">' + escapeHtml(scanFeedback.message) + "</div>",
@@ -191,9 +264,11 @@ async function render(): Promise<void> {
     '<div class="batch-row"><label>本批上限<input id="batchLimit" type="number" min="1" max="20" value="',
     String(state.settings.maxJobsPerBatch),
     '"></label><div class="batch-start"><small id="selectionSummary">已选 ', String(selectedCount), " / 上限 ",
-    String(state.settings.maxJobsPerBatch), '</small><button id="start" class="primary" type="button"',
+    String(state.settings.maxJobsPerBatch), '</small><button id="start" class="primary '
+    + (state.settings.executionPolicy === "automatic_send" ? "automatic-action" : "") + '" type="button"',
     selectionWithinLimit ? "" : " disabled",
-    '>', batchActive ? "批次进行中" : "开始生成", "</button></div></div></section>",
+    ' aria-busy="' + String(startBusy) + '">',
+    escapeHtml(startBusy ? "正在启动" : startLabel), "</button></div></div></section>",
     '<section><div class="section-title"><h2>批次</h2><div id="run-actions"></div></div>',
     runMarkup(run),
     '</section>',
@@ -240,8 +315,13 @@ async function render(): Promise<void> {
   document.querySelector("#start")?.addEventListener("click", () => {
     const candidateIds = state.scanPreview?.candidates.map((candidate) => candidate.jobId) ?? [];
     const selected = candidateIds.filter((jobId) => selectedJobIds?.has(jobId));
-    void perform({ type: "START_BATCH", selectedJobIds: selected });
+    void startBatchFromPanel({
+      type: "START_BATCH",
+      selectedJobIds: selected,
+      expectedExecutionPolicy: state.settings.executionPolicy
+    });
   });
+  configureWaitCountdownTimer();
 }
 
 function updateSelectionControls(limit: number, batchActive: boolean): void {
@@ -249,7 +329,16 @@ function updateSelectionControls(limit: number, batchActive: boolean): void {
   const summary = document.querySelector<HTMLElement>("#selectionSummary");
   const start = document.querySelector<HTMLButtonElement>("#start");
   if (summary) summary.textContent = "已选 " + count + " / 上限 " + limit;
-  if (start) start.disabled = batchActive || count === 0 || count > limit;
+  if (start) start.disabled = startBusy || batchActive || count === 0 || count > limit;
+}
+
+function updateStartBusy(busy: boolean): void {
+  startBusy = busy;
+  const start = document.querySelector<HTMLButtonElement>("#start");
+  if (!start) return;
+  start.disabled = busy || start.disabled;
+  start.setAttribute("aria-busy", String(busy));
+  if (busy) start.textContent = "正在启动";
 }
 
 function updateScanFeedback(feedback: ScanFeedback, busy: boolean): void {
@@ -297,6 +386,25 @@ async function perform(request: Parameters<typeof sendCommand>[0]): Promise<void
     await sendCommand(request);
     await render();
   } catch (error) {
+    if (toast) toast.textContent = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function startBatchFromPanel(request: Parameters<typeof sendCommand>[0]): Promise<void> {
+  if (startBusy) return;
+  const toast = document.querySelector<HTMLElement>("#toast");
+  updateStartBusy(true);
+  try {
+    await sendCommand(request);
+    startBusy = false;
+    await render();
+  } catch (error) {
+    startBusy = false;
+    updateStartBusy(false);
+    updateSelectionControls(
+      Number(document.querySelector<HTMLInputElement>("#batchLimit")?.value || 10),
+      false
+    );
     if (toast) toast.textContent = error instanceof Error ? error.message : String(error);
   }
 }
