@@ -1,0 +1,4 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/frontend/jobflow-cross-layer-contracts.md", "reason": "MV3, runtime message, Supabase RPC, state-machine, and live platform boundary contracts"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Map UI-background-content-platform-database data and evidence flow"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Keep live transition and payload decoding centralized"}
