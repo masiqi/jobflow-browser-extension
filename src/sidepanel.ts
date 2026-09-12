@@ -9,7 +9,8 @@ import {
   createElement
 } from "lucide";
 import { escapeHtml, sendCommand } from "./ui/command";
-import type { AppState, BatchRun, OpportunityRecord, ScanPreview } from "./types";
+import { recordStatusLabel } from "./ui/delivery";
+import type { AppState, BatchRun, DeliveryRecord, OpportunityRecord, ScanPreview } from "./types";
 
 type ScanFeedback = {
   kind: "idle" | "progress" | "success" | "error";
@@ -147,14 +148,16 @@ function runMarkup(run: BatchRun | null): string {
   ].join("");
 }
 
-function recordsMarkup(records: OpportunityRecord[]): string {
-  return records.slice(0, 8).map((record) =>
-    '<div class="record"><span class="status ' + escapeHtml(record.status) + '"></span><div><b>'
+function recordsMarkup(records: OpportunityRecord[], deliveries: DeliveryRecord[]): string {
+  return records.slice(0, 8).map((record) => {
+    const delivery = deliveries.find((item) => item.opportunityId === record.id);
+    const latestReason = delivery?.latestReason ?? record.latestReason;
+    return '<div class="record"><span class="status ' + escapeHtml(delivery?.overallStatus ?? record.status) + '"></span><div><b>'
     + escapeHtml(record.title) + '</b><small>' + escapeHtml(record.company) + " · "
-    + escapeHtml(record.status) + '</small>'
-    + (record.latestReason ? '<small class="record-reason">原因：' + escapeHtml(record.latestReason) + "</small>" : "")
-    + "</div></div>"
-  ).join("") || '<p class="empty">暂无职位记录。</p>';
+    + escapeHtml(recordStatusLabel(record, delivery)) + '</small>'
+    + (latestReason ? '<small class="record-reason">原因：' + escapeHtml(latestReason) + "</small>" : "")
+    + "</div></div>";
+  }).join("") || '<p class="empty">暂无职位记录。</p>';
 }
 
 async function render(): Promise<void> {
@@ -180,7 +183,7 @@ async function render(): Promise<void> {
     '</p><small>' + escapeHtml(state.settings.model.route.toUpperCase()) + " · "
       + escapeHtml(state.settings.model.provider) + " / " + escapeHtml(state.settings.model.model)
       + '</small></div><div id="header-actions"></div></header>',
-    '<section class="status-band"><span class="dot"></span><div><b>仅生成草稿</b><small>不会投递、发送或操作猎聘筛选器</small></div></section>',
+    '<section class="status-band"><span class="dot"></span><div><b>草稿与筛选</b><small>真实发送仅在管理台逐条确认</small></div></section>',
     '<section><div class="section-title"><h2>当前结果</h2><div id="scan-actions"></div></div>',
     '<div id="scanStatus" class="scan-status ' + escapeHtml(scanFeedback.kind)
       + '" role="status" aria-live="polite">' + escapeHtml(scanFeedback.message) + "</div>",
@@ -195,7 +198,7 @@ async function render(): Promise<void> {
     runMarkup(run),
     '</section>',
     '<section><div class="section-title"><h2>最近记录</h2><button id="viewAll" class="link-button" type="button">查看全部</button></div>',
-    '<div class="records">', recordsMarkup(state.opportunities),
+    '<div class="records">', recordsMarkup(state.opportunities, state.deliveries),
     '</div></section>',
     '<div id="toast" role="status" aria-live="polite"></div>'
   ].join("");

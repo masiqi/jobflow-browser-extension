@@ -9,6 +9,8 @@ import type {
   EvaluationRecord,
   JdRuleSettings,
   ListCandidate,
+  DeliveryAttempt,
+  DeliveryRecord,
   MessageDraft,
   OpportunityEvent,
   OpportunityRecord,
@@ -97,6 +99,31 @@ const evaluationRowSchema = z.object({
   model_route: z.enum(["managed", "byok"]),
   provider: z.enum(["openai", "deepseek", "openrouter", "custom"]),
   model: z.string(),
+  created_at: z.string()
+});
+
+const deliveryRecordRowSchema = z.object({
+  opportunity_id: z.string().uuid(),
+  platform: z.literal("liepin"),
+  platform_job_id: z.string(),
+  resume_mode: z.literal("platform_default"),
+  overall_status: z.enum(["ready", "preflighting", "awaiting_confirmation", "in_progress", "partial", "succeeded", "failed", "review_required"]),
+  application_status: z.enum(["pending", "attempted", "verified", "failed"]),
+  greeting_status: z.enum(["pending", "attempted", "verified", "failed"]),
+  draft_revision_id: z.string().uuid().nullable(),
+  draft_sha256: z.string().nullable(),
+  reservation_id: z.string().uuid().nullable(),
+  latest_reason: z.string().nullable(),
+  updated_at: z.string()
+});
+
+const deliveryAttemptRowSchema = z.object({
+  id: z.string().uuid(),
+  request_id: z.string().uuid(),
+  opportunity_id: z.string().uuid(),
+  event_kind: z.string(),
+  evidence_code: z.string(),
+  evidence: z.record(z.string(), z.unknown()),
   created_at: z.string()
 });
 
@@ -402,6 +429,120 @@ export async function listDrafts(): Promise<MessageDraft[]> {
   }));
 }
 
+export async function prepareReviewedDelivery(
+  opportunityId: string,
+  draftRevisionId: string,
+  draftSha256: string
+): Promise<DeliveryRecord> {
+  const client = await getSupabaseClient();
+  const { data, error } = await client.rpc("prepare_reviewed_delivery", {
+    target_opportunity_id: opportunityId,
+    target_draft_revision_id: draftRevisionId,
+    target_draft_sha256: draftSha256
+  });
+  if (error) throw new Error("准备投递记录失败");
+  return mapDeliveryRecord(deliveryRecordRowSchema.parse(data));
+}
+
+export async function reserveReviewedDeliveryQuota(
+  opportunityId: string,
+  requestId: string,
+  dailyLimit: number
+): Promise<string> {
+  const client = await getSupabaseClient();
+  const { data, error } = await client.rpc("reserve_delivery_daily_unit", {
+    target_opportunity_id: opportunityId,
+    target_request_id: requestId,
+    target_daily_limit: dailyLimit
+  });
+  if (error || typeof data !== "string") throw new Error("今日投递额度已满或无法预留");
+  return data;
+}
+
+export async function markReviewedDeliveryWriteStarted(
+  opportunityId: string,
+  reservationId: string
+): Promise<void> {
+  const client = await getSupabaseClient();
+  const { error } = await client.rpc("mark_delivery_write_started", {
+    target_opportunity_id: opportunityId,
+    target_reservation_id: reservationId
+  });
+  if (error) throw new Error("无法确认投递写入边界");
+}
+
+export async function releaseReviewedDeliveryQuota(
+  opportunityId: string,
+  reservationId: string
+): Promise<boolean> {
+  const client = await getSupabaseClient();
+  const { data, error } = await client.rpc("release_delivery_daily_unit", {
+    target_opportunity_id: opportunityId,
+    target_reservation_id: reservationId
+  });
+  if (error || typeof data !== "boolean") throw new Error("无法释放未使用的投递额度");
+  return data;
+}
+
+export async function recordReviewedDeliveryAttempt(input: {
+  opportunityId: string;
+  requestId: string;
+  eventKind: string;
+  component?: "application" | "greeting";
+  status?: "pending" | "attempted" | "verified" | "failed";
+  evidenceCode: string;
+  evidence?: Record<string, unknown>;
+  reason?: string;
+  draftRevisionId?: string;
+  draftSha256?: string;
+  reservationId?: string;
+}): Promise<DeliveryRecord> {
+  const client = await getSupabaseClient();
+  const { data, error } = await client.rpc("record_reviewed_delivery_attempt", {
+    target_opportunity_id: input.opportunityId,
+    target_request_id: input.requestId,
+    event_kind: input.eventKind,
+    component_name: input.component ?? null,
+    component_status: input.status ?? null,
+    evidence_code: input.evidenceCode,
+    evidence_payload: input.evidence ?? {},
+    reason_text: input.reason ?? null,
+    target_draft_revision_id: input.draftRevisionId ?? null,
+    target_draft_sha256: input.draftSha256 ?? null,
+    target_reservation_id: input.reservationId ?? null
+  });
+  if (error) throw new Error("记录投递进度失败");
+  return mapDeliveryRecord(deliveryRecordRowSchema.parse(data));
+}
+
+export async function listDeliveryRecords(): Promise<DeliveryRecord[]> {
+  const client = await getSupabaseClient();
+  const { data, error } = await client.from("delivery_records")
+    .select("*")
+    .order("updated_at", { ascending: false })
+    .limit(500);
+  if (error) throw new Error("读取投递记录失败");
+  return z.array(deliveryRecordRowSchema).parse(data).map(mapDeliveryRecord);
+}
+
+export async function listDeliveryAttempts(): Promise<DeliveryAttempt[]> {
+  const client = await getSupabaseClient();
+  const { data, error } = await client.from("delivery_attempts")
+    .select("*")
+    .order("created_at", { ascending: true })
+    .limit(2000);
+  if (error) throw new Error("读取投递历史失败");
+  return z.array(deliveryAttemptRowSchema).parse(data).map((row) => ({
+    id: row.id,
+    requestId: row.request_id,
+    opportunityId: row.opportunity_id,
+    eventKind: row.event_kind,
+    evidenceCode: row.evidence_code,
+    evidence: row.evidence,
+    createdAt: row.created_at
+  }));
+}
+
 export async function listEvaluations(): Promise<EvaluationRecord[]> {
   const client = await getSupabaseClient();
   const { data, error } = await client.from("evaluations")
@@ -538,5 +679,22 @@ function mapOpportunity(row: z.infer<typeof opportunityRowSchema>): OpportunityR
     firstSeenAt: row.first_seen_at,
     lastSeenAt: row.last_seen_at,
     latestReason: row.latest_reason ?? undefined
+  };
+}
+
+function mapDeliveryRecord(row: z.infer<typeof deliveryRecordRowSchema>): DeliveryRecord {
+  return {
+    opportunityId: row.opportunity_id,
+    platform: row.platform,
+    platformJobId: row.platform_job_id,
+    resumeMode: row.resume_mode,
+    overallStatus: row.overall_status,
+    applicationStatus: row.application_status,
+    greetingStatus: row.greeting_status,
+    draftRevisionId: row.draft_revision_id ?? undefined,
+    draftSha256: row.draft_sha256 ?? undefined,
+    reservationId: row.reservation_id ?? undefined,
+    latestReason: row.latest_reason ?? undefined,
+    updatedAt: row.updated_at
   };
 }

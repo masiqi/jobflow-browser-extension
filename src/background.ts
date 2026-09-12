@@ -6,6 +6,7 @@ import {
   getAuthProjection,
   invokeModelGateway,
   loadActiveFilterConfig,
+  listDeliveryRecords,
   listDrafts,
   listEvaluations,
   listOpportunities,
@@ -13,8 +14,13 @@ import {
   listResumeProfiles,
   login,
   logout,
+  markReviewedDeliveryWriteStarted,
   register,
   recordJobDetails,
+  prepareReviewedDelivery,
+  recordReviewedDeliveryAttempt,
+  releaseReviewedDeliveryQuota,
+  reserveReviewedDeliveryQuota,
   saveDraftProfile,
   saveFilterConfig,
   updateDraftProfile,
@@ -49,6 +55,7 @@ import type {
   AppState,
   BatchItem,
   BatchRun,
+  DeliveryRecord,
   DetailJob,
   ExtensionSettings,
   ListCandidate,
@@ -59,6 +66,7 @@ import type {
 
 const QUEUE_ALARM = "jobflow:queue";
 const DETAIL_ALARM_PREFIX = "jobflow:detail:";
+const REVIEWED_SEND_LEASE_TTL_MS = 5 * 60 * 1000;
 
 type PostDetailStage = "evaluating" | "generating";
 interface PostDetailResult {
@@ -67,6 +75,19 @@ interface PostDetailResult {
   filter: NonNullable<BatchItem["filter"]>;
   suitability?: NonNullable<BatchItem["suitability"]>;
 }
+
+interface ReviewedSendLease {
+  opportunityId: string;
+  platformJobId: string;
+  tabId: number;
+  leaseId: string;
+  draftRevisionId: string;
+  draftSha256: string;
+  preparedAt: number;
+}
+
+const reviewedSendLeases = new Map<string, ReviewedSendLease>();
+const reviewedSendExecuting = new Set<string>();
 
 function now(): string {
   return new Date().toISOString();
@@ -155,7 +176,8 @@ async function getAppState(): Promise<AppState> {
       opportunities: [],
       evaluations: [],
       events: [],
-      drafts: []
+      drafts: [],
+      deliveries: []
     };
   }
   await ensureDeviceOwner(auth.userId);
@@ -165,12 +187,13 @@ async function getAppState(): Promise<AppState> {
     settings = { ...settings, rules: cloudRules };
     await saveSettings(settings);
   }
-  const [profiles, opportunities, evaluations, events, drafts] = await Promise.all([
+  const [profiles, opportunities, evaluations, events, drafts, deliveries] = await Promise.all([
     listResumeProfiles(),
     listOpportunities(),
     listEvaluations(),
     listOpportunityEvents(),
-    listDrafts()
+    listDrafts(),
+    listDeliveryRecords()
   ]);
   const profile = profiles.find((item) => item.state === "draft")
     ?? profiles.find((item) => item.state === "active")
@@ -186,7 +209,8 @@ async function getAppState(): Promise<AppState> {
     opportunities,
     evaluations,
     events,
-    drafts
+    drafts,
+    deliveries
   };
 }
 
@@ -418,7 +442,6 @@ async function handleDetail(job: DetailJob, leaseId: string): Promise<void> {
   if (item.status !== "opening" && item.status !== "extracting") return;
   await chrome.alarms.clear(detailAlarmName(run.id, leaseId));
   item.status = "extracting";
-  item.candidate = { ...item.candidate, ...job };
   await saveRun(run);
   const records = await listOpportunities();
   const opportunity = opportunityForJob(records, job);
@@ -587,6 +610,345 @@ async function generateForOpportunity(opportunityId: string): Promise<void> {
   parseGreetingDecision(output, job, profile);
 }
 
+function currentDraftRevision(draft: { currentText: string; revisions: Array<{ id: string; text: string; createdAt: string }> }): { id: string; text: string } | null {
+  const matching = draft.revisions
+    .filter((revision) => revision.text === draft.currentText)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+  return matching ? { id: matching.id, text: matching.text } : null;
+}
+
+async function loadReviewedSendIdentity(
+  opportunityId: string,
+  draftRevisionId: string,
+  draftSha256: string
+): Promise<{ opportunity: OpportunityRecord; draftText: string; delivery: DeliveryRecord }> {
+  const auth = await getAuthProjection();
+  if (auth.status !== "signed_in" || !auth.userId) throw new Error("请先登录");
+  const [opportunities, drafts] = await Promise.all([listOpportunities(), listDrafts()]);
+  const opportunity = opportunities.find((item) => item.id === opportunityId);
+  if (!opportunity || opportunity.userId !== auth.userId) throw new Error("职位记录不存在或不属于当前账号");
+  if (opportunity.platform !== "liepin") throw new Error("当前只支持猎聘职位");
+  if (opportunity.status !== "draft_ready") throw new Error("只有已审核草稿可以投递并打招呼");
+  const draft = drafts.find((item) => item.opportunityId === opportunityId);
+  const revision = draft ? currentDraftRevision(draft) : null;
+  if (!draft || !revision) throw new Error("当前草稿修订不存在");
+  if (revision.id !== draftRevisionId) throw new Error("草稿修订已变化，请重新确认");
+  if (await sourceHash(draft.currentText) !== draftSha256) throw new Error("草稿内容已变化，请重新确认");
+  const delivery = await prepareReviewedDelivery(opportunityId, draftRevisionId, draftSha256);
+  if (delivery.overallStatus === "succeeded") throw new Error("该职位已经完成投递和打招呼");
+  return { opportunity, draftText: draft.currentText, delivery };
+}
+
+export function isTrustedOptionsSender(sender: chrome.runtime.MessageSender): boolean {
+  if (sender.id !== chrome.runtime.id || !sender.url) return false;
+  const expected = chrome.runtime.getURL("options.html");
+  try {
+    const senderUrl = new URL(sender.url);
+    const expectedUrl = new URL(expected);
+    return senderUrl.origin === expectedUrl.origin && senderUrl.pathname === expectedUrl.pathname;
+  } catch {
+    return false;
+  }
+}
+
+async function findOpenLiepinDetailTab(platformJobId: string): Promise<number> {
+  const tabs = await chrome.tabs.query({ url: ["https://*.liepin.com/job/*.shtml*", "https://*.liepin.com/a/*.shtml*"] });
+  const tab = tabs.find((candidate) => {
+    if (typeof candidate.id !== "number" || !candidate.url) return false;
+    return new RegExp("/(?:job|a)/" + platformJobId + "\\.shtml(?:[?#]|$)", "i").test(candidate.url);
+  });
+  if (typeof tab?.id !== "number") throw new Error("请先打开该猎聘职位详情页，再回到管理页准备发送");
+  return tab.id;
+}
+
+function parseReviewedSendPreflight(raw: unknown): { ok: boolean; reason?: string; blocker?: string; actionTier?: string; resumeMode?: string } {
+  return z.object({
+    ok: z.boolean(),
+    platformJobId: z.string().max(128),
+    resumeMode: z.literal("platform_default"),
+    actionTier: z.enum(["primary", "secondary", "application_confirmation"]).optional(),
+    blocker: z.string().max(80).optional(),
+    reason: z.string().max(200).optional()
+  }).strict().parse(raw);
+}
+
+function parseReviewedSendExecution(raw: unknown): { ok: boolean; application: "attempted" | "verified" | "failed"; greeting: "attempted" | "verified" | "failed"; evidenceCodes: string[]; reason?: string } {
+  return z.object({
+    ok: z.boolean(),
+    application: z.enum(["attempted", "verified", "failed"]),
+    greeting: z.enum(["attempted", "verified", "failed"]),
+    evidenceCodes: z.array(z.string().max(80)).max(8),
+    reason: z.string().max(200).optional()
+  }).strict().parse(raw);
+}
+
+function reviewedComponentReason(
+  component: "application" | "greeting",
+  status: "attempted" | "verified" | "failed",
+  fallback?: string
+): string {
+  if (fallback) return fallback;
+  if (component === "application") {
+    if (status === "verified") return "正式投递已从猎聘页面验证";
+    if (status === "attempted") return "已尝试正式投递，尚未取得独立平台证据";
+    return "正式投递未完成";
+  }
+  if (status === "verified") return "招呼语已从猎聘页面验证";
+  if (status === "attempted") return "已尝试发送招呼语，尚未取得独立平台证据";
+  return "招呼语发送未完成";
+}
+
+async function prepareReviewedSend(
+  sender: chrome.runtime.MessageSender,
+  opportunityId: string,
+  draftRevisionId: string,
+  draftSha256: string
+): Promise<DeliveryRecord> {
+  if (!isTrustedOptionsSender(sender)) throw new Error("只能从扩展管理页发起人工确认发送");
+  const { opportunity } = await loadReviewedSendIdentity(opportunityId, draftRevisionId, draftSha256);
+  const tabId = await findOpenLiepinDetailTab(opportunity.platformJobId);
+  const leaseId = crypto.randomUUID();
+  await recordReviewedDeliveryAttempt({
+    opportunityId,
+    requestId: crypto.randomUUID(),
+    eventKind: "delivery_preflighting",
+    evidenceCode: "preflight_started",
+    draftRevisionId,
+    draftSha256
+  });
+  let preflight: ReturnType<typeof parseReviewedSendPreflight>;
+  try {
+    preflight = parseReviewedSendPreflight(await chrome.tabs.sendMessage(tabId, {
+      type: "CONTENT_REVIEWED_SEND_PREFLIGHT",
+      leaseId,
+      platformJobId: opportunity.platformJobId
+    }));
+  } catch {
+    await recordReviewedDeliveryAttempt({
+      opportunityId,
+      requestId: crypto.randomUUID(),
+      eventKind: "delivery_review_required",
+      evidenceCode: "preflight_transport_failed",
+      reason: "无法读取猎聘发送前状态",
+      draftRevisionId,
+      draftSha256
+    });
+    throw new Error("无法读取猎聘发送前状态");
+  }
+  if (!preflight.ok) {
+    await recordReviewedDeliveryAttempt({
+      opportunityId,
+      requestId: crypto.randomUUID(),
+      eventKind: "delivery_review_required",
+      evidenceCode: preflight.blocker || "preflight_failed",
+      reason: preflight.reason || "发送前检查失败",
+      draftRevisionId,
+      draftSha256
+    });
+    throw new Error(preflight.reason || "发送前检查失败");
+  }
+  reviewedSendLeases.set(opportunityId, {
+    opportunityId,
+    platformJobId: opportunity.platformJobId,
+    tabId,
+    leaseId,
+    draftRevisionId,
+    draftSha256,
+    preparedAt: Date.now()
+  });
+  const prepared = await recordReviewedDeliveryAttempt({
+    opportunityId,
+    requestId: crypto.randomUUID(),
+    eventKind: "delivery_preflighted",
+    evidenceCode: "preflight_ok",
+    evidence: { actionTier: preflight.actionTier, resumeMode: "platform_default" },
+    draftRevisionId,
+    draftSha256
+  });
+  await notifyState();
+  return prepared;
+}
+
+async function confirmReviewedSend(
+  sender: chrome.runtime.MessageSender,
+  opportunityId: string,
+  draftRevisionId: string,
+  draftSha256: string
+): Promise<DeliveryRecord> {
+  if (!isTrustedOptionsSender(sender)) throw new Error("只能从扩展管理页确认人工发送");
+  if (reviewedSendExecuting.has(opportunityId)) throw new Error("该职位发送流程正在执行");
+  reviewedSendExecuting.add(opportunityId);
+  try {
+  const { opportunity, draftText, delivery } = await loadReviewedSendIdentity(opportunityId, draftRevisionId, draftSha256);
+  if (delivery.applicationStatus === "verified" && delivery.greetingStatus === "verified") {
+    throw new Error("该职位已经完成投递和打招呼");
+  }
+  const needsApplication = delivery.applicationStatus !== "verified";
+  const needsGreeting = delivery.greetingStatus !== "verified";
+  const lease = reviewedSendLeases.get(opportunityId);
+  if (!lease
+    || lease.draftRevisionId !== draftRevisionId
+    || lease.draftSha256 !== draftSha256
+    || lease.platformJobId !== opportunity.platformJobId
+    || Date.now() - lease.preparedAt > REVIEWED_SEND_LEASE_TTL_MS) {
+    throw new Error("发送前检查已过期，请重新准备");
+  }
+  const finalPreflight = parseReviewedSendPreflight(await chrome.tabs.sendMessage(lease.tabId, {
+    type: "CONTENT_REVIEWED_SEND_PREFLIGHT",
+    leaseId: lease.leaseId,
+    platformJobId: opportunity.platformJobId
+  }));
+  if (!finalPreflight.ok) {
+    await recordReviewedDeliveryAttempt({
+      opportunityId,
+      requestId: crypto.randomUUID(),
+      eventKind: "delivery_review_required",
+      evidenceCode: finalPreflight.blocker || "final_preflight_failed",
+      reason: finalPreflight.reason || "最终发送前检查失败",
+      draftRevisionId,
+      draftSha256
+    });
+    throw new Error(finalPreflight.reason || "最终发送前检查失败");
+  }
+  await recordReviewedDeliveryAttempt({
+    opportunityId,
+    requestId: crypto.randomUUID(),
+    eventKind: "delivery_confirmed",
+    evidenceCode: "user_confirmed",
+    draftRevisionId,
+    draftSha256
+  });
+  let reservationId: string | undefined;
+  let writeStarted = false;
+  try {
+    const reservationRequestId = crypto.randomUUID();
+    reservationId = await reserveReviewedDeliveryQuota(
+      opportunityId,
+      reservationRequestId,
+      (await loadSettings()).dailySendLimit
+    );
+    await recordReviewedDeliveryAttempt({
+      opportunityId,
+      requestId: reservationRequestId,
+      eventKind: "daily_unit_reserved",
+      evidenceCode: "quota_reserved",
+      reservationId,
+      draftRevisionId,
+      draftSha256
+    });
+    await markReviewedDeliveryWriteStarted(opportunityId, reservationId);
+    writeStarted = true;
+    await recordReviewedDeliveryAttempt({
+      opportunityId,
+      requestId: crypto.randomUUID(),
+      eventKind: "delivery_write_started",
+      evidenceCode: "write_boundary_entered",
+      reservationId,
+      draftRevisionId,
+      draftSha256
+    });
+    if (needsApplication) {
+      await recordReviewedDeliveryAttempt({
+        opportunityId,
+        requestId: crypto.randomUUID(),
+        eventKind: "application_attempted",
+        component: "application",
+        status: "attempted",
+        evidenceCode: "native_action_attempting",
+        reservationId,
+        draftRevisionId,
+        draftSha256
+      });
+    }
+    if (needsGreeting) {
+      await recordReviewedDeliveryAttempt({
+        opportunityId,
+        requestId: crypto.randomUUID(),
+        eventKind: "greeting_attempted",
+        component: "greeting",
+        status: "attempted",
+        evidenceCode: "greeting_action_attempting",
+        reservationId,
+        draftRevisionId,
+        draftSha256
+      });
+    }
+    const result = parseReviewedSendExecution(await chrome.tabs.sendMessage(lease.tabId, {
+      type: "CONTENT_REVIEWED_SEND_EXECUTE",
+      leaseId: lease.leaseId,
+      platformJobId: opportunity.platformJobId,
+      draftText,
+      draftSha256,
+      needsApplication,
+      needsGreeting
+    }));
+    let latest = delivery;
+    if (needsApplication) {
+      latest = await recordReviewedDeliveryAttempt({
+        opportunityId,
+        requestId: crypto.randomUUID(),
+        eventKind: result.application === "verified" ? "application_verified" : result.application === "failed" ? "application_failed" : "application_attempted",
+        component: "application",
+        status: result.application,
+        evidenceCode: result.evidenceCodes[0] || "application_observed",
+        evidence: { codeCount: result.evidenceCodes.length },
+        reason: reviewedComponentReason("application", result.application, result.reason),
+        reservationId,
+        draftRevisionId,
+        draftSha256
+      });
+    }
+    if (needsGreeting) {
+      latest = await recordReviewedDeliveryAttempt({
+        opportunityId,
+        requestId: crypto.randomUUID(),
+        eventKind: result.greeting === "verified" ? "greeting_verified" : result.greeting === "failed" ? "greeting_failed" : "greeting_attempted",
+        component: "greeting",
+        status: result.greeting,
+        evidenceCode: result.evidenceCodes.find((code) => code.includes("greeting") || code.includes("composer") || code.includes("send_")) || "greeting_observed",
+        evidence: { textLength: Array.from(draftText).length },
+        reason: reviewedComponentReason("greeting", result.greeting, result.reason),
+        reservationId,
+        draftRevisionId,
+        draftSha256
+      });
+    }
+    await notifyState();
+    return latest;
+  } catch (error) {
+    if (reservationId && !writeStarted) {
+      const released = await releaseReviewedDeliveryQuota(opportunityId, reservationId).catch(() => false);
+      if (released) {
+        await recordReviewedDeliveryAttempt({
+          opportunityId,
+          requestId: crypto.randomUUID(),
+          eventKind: "daily_unit_released",
+          evidenceCode: "quota_released_before_write",
+          draftRevisionId,
+          draftSha256
+        }).catch(() => undefined);
+      }
+    } else if (writeStarted) {
+      await recordReviewedDeliveryAttempt({
+        opportunityId,
+        requestId: crypto.randomUUID(),
+        eventKind: "delivery_review_required",
+        evidenceCode: "write_result_unavailable",
+        reason: error instanceof Error ? error.message : "真实写入结果不可用",
+        reservationId,
+        draftRevisionId,
+        draftSha256
+      }).catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    reviewedSendLeases.delete(opportunityId);
+  }
+  } finally {
+    reviewedSendExecuting.delete(opportunityId);
+  }
+}
+
 async function handleReviewDecision(
   opportunityId: string,
   decision: "continue_generation" | "permanently_exclude"
@@ -711,6 +1073,10 @@ async function handleRequest(
     case "RETRY_STORED_OPPORTUNITY":
       await retryStoredOpportunity(request.opportunityId);
       return undefined;
+    case "PREPARE_REVIEWED_SEND":
+      return prepareReviewedSend(sender, request.opportunityId, request.draftRevisionId, request.draftSha256);
+    case "CONFIRM_REVIEWED_SEND":
+      return confirmReviewedSend(sender, request.opportunityId, request.draftRevisionId, request.draftSha256);
     case "EDIT_DRAFT": {
       const settings = await loadSettings();
       await invokeModel("edit_draft", {

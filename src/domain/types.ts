@@ -94,6 +94,7 @@ export interface ExtensionSettings {
   rules: JdRuleSettings;
   model: ModelRouteSettings;
   maxJobsPerBatch: number;
+  dailySendLimit: number;
   detailTimeoutSeconds: number;
   launcherVisible: boolean;
 }
@@ -185,6 +186,43 @@ export interface MessageDraft {
   currentText: string;
   revisions: DraftRevision[];
   updatedAt: string;
+}
+
+export type DeliveryComponentStatus = "pending" | "attempted" | "verified" | "failed";
+export type DeliveryOverallStatus =
+  | "ready"
+  | "preflighting"
+  | "awaiting_confirmation"
+  | "in_progress"
+  | "partial"
+  | "succeeded"
+  | "failed"
+  | "review_required";
+export type DeliveryResumeMode = "platform_default";
+
+export interface DeliveryRecord {
+  opportunityId: string;
+  platform: PlatformKey;
+  platformJobId: string;
+  resumeMode: DeliveryResumeMode;
+  overallStatus: DeliveryOverallStatus;
+  applicationStatus: DeliveryComponentStatus;
+  greetingStatus: DeliveryComponentStatus;
+  draftRevisionId?: string;
+  draftSha256?: string;
+  reservationId?: string;
+  latestReason?: string;
+  updatedAt: string;
+}
+
+export interface DeliveryAttempt {
+  id: string;
+  requestId: string;
+  opportunityId: string;
+  eventKind: string;
+  evidenceCode: string;
+  evidence: Record<string, unknown>;
+  createdAt: string;
 }
 
 export interface OpportunityRecord {
@@ -295,4 +333,5 @@ export interface AppState {
   evaluations: EvaluationRecord[];
   events: OpportunityEvent[];
   drafts: MessageDraft[];
+  deliveries: DeliveryRecord[];
 }

@@ -1,6 +1,6 @@
 # JobFlow Cross-Layer Contracts
 
-## Scenario: Extend the JobFlow draft-only workflow
+## Scenario: Extend the JobFlow draft and reviewed-send workflow
 
 ### 1. Scope / Trigger
 
@@ -36,6 +36,15 @@ Stored-detail retry runtime command:
 { type: "RETRY_STORED_OPPORTUNITY", opportunityId: string /* UUID */ }
 ~~~
 
+Reviewed-send runtime commands:
+
+~~~typescript
+{ type: "PREPARE_REVIEWED_SEND", opportunityId, draftRevisionId, draftSha256 }
+{ type: "CONFIRM_REVIEWED_SEND", opportunityId, draftRevisionId, draftSha256 }
+{ type: "CONTENT_REVIEWED_SEND_PREFLIGHT", leaseId, platformJobId }
+{ type: "CONTENT_REVIEWED_SEND_EXECUTE", leaseId, platformJobId, draftText, draftSha256, needsApplication, needsGreeting }
+~~~
+
 Canonical user-scoped database commands:
 
 ~~~text
@@ -51,6 +60,11 @@ record_filter_result(target_opportunity_id, target_request_id, job, filter_resul
 record_evaluation_result(target_opportunity_id, target_request_id, job, profile_id, output, route, provider_name, model_name)
 record_greeting_result(target_opportunity_id, target_request_id, profile_id, output, route, provider_name, model_name)
 record_processing_failure(target_opportunity_id, target_request_id, error_code)
+prepare_reviewed_delivery(target_opportunity_id, target_draft_revision_id, target_draft_sha256)
+reserve_delivery_daily_unit(target_opportunity_id, target_request_id, target_daily_limit)
+mark_delivery_write_started(target_opportunity_id, target_reservation_id)
+release_delivery_daily_unit(target_opportunity_id, target_reservation_id)
+record_reviewed_delivery_attempt(target_opportunity_id, target_request_id, event_kind, component_name, component_status, evidence_code, evidence_payload, reason_text, target_draft_revision_id, target_draft_sha256, target_reservation_id)
 append_user_opportunity_event(target_opportunity_id, event_kind, event_payload)
 edit_my_draft(target_opportunity_id, target_request_id, draft_text)
 delete_my_product_data()
@@ -63,10 +77,12 @@ Runtime requests:
 - Decode unknown once in src/domain/messages.ts.
 - Use a discriminated type field.
 - Reject unknown fields with strict Zod objects.
-- No current request contains mode, live, send, apply, click, upload, scroll, or pagination behavior.
+- Live behavior exists only in the strict prepare/confirm reviewed-send commands. No batch, automatic, page-load, scroll, pagination, upload, or free-form platform command exists.
 - Content scan returns sourceUrl plus at most 500 decoded list candidates.
 - A batch accepts 1 through 20 selected platform job IDs.
 - Stored-detail retry accepts only an opportunity UUID. JD text, profile data, model credentials, and status cannot be supplied by the page command.
+- Reviewed-send initiation is accepted only from the exact extension options page and carries opportunity/revision/hash identity, never caller-supplied message or JD content.
+- Content execution requires the same successful, unexpired, job-bound preflight lease and rechecks the SHA-256 of `draftText` before any platform action.
 
 Opportunity identity:
 
@@ -81,11 +97,15 @@ State:
 - Named RPCs validate the prior state and derive the next state.
 - Request IDs make processing event and revision retries idempotent.
 - An LLM exclusion blocks automatic reevaluation by identity; user_override adds an exception without deleting the exclusion.
+- Delivery state is separate from draft opportunity state. Application and greeting each use pending/attempted/verified/failed; overall state is derived and reaches succeeded only when both are verified.
+- Verified components cannot be downgraded or replayed. A repeated delivery request ID is a complete no-op even if its arguments differ.
 
 Auth and local storage:
 
 - One Supabase client exists in the background service worker.
 - chrome.storage.local and session access levels are TRUSTED_CONTEXTS.
+- Persisted settings, scan previews, and batch runs are parsed with their canonical strict schema before writing and after reading; an invalid mutation must fail at the write boundary instead of poisoning recoverable state.
+- `BatchItem.candidate` stores only the `ListCandidate` snapshot. Accepted `DetailJob` fields belong in the owner-scoped opportunity record and must not be merged into the batch candidate.
 - Content scripts never access Chrome storage, tokens, BYOK credentials, or source resumes.
 - BYOK records contain ownerId and value and are returned only for that owner.
 - A device-owner change clears settings, run, scan, and BYOK state.
@@ -145,8 +165,21 @@ Stored-detail retry:
 - The background reloads the owner-scoped record and active profile, requires at least one approved fact, and verifies the selected managed/BYOK route before provider work.
 - Reconstruct `DetailJob` only from `OpportunityRecord`; never accept JD/profile fields from the runtime command.
 - Normal batch capture and stored retry call one shared post-detail function for deterministic rules, suitability validation, greeting validation, and Edge persistence.
-- Stored retry never calls `chrome.tabs.create`, reads Liepin DOM, or changes the draft-only safety boundary.
+- Stored retry never calls `chrome.tabs.create`, reads Liepin DOM, or enters the reviewed-send boundary.
 - A downstream retry failure is recorded through `record_processing_failure`; success or failure refreshes the record center and leaves explicit inline feedback.
+
+Reviewed send:
+
+- PREPARE is read-only with respect to Liepin and quota. It validates owner, `draft_ready`, current revision/hash, exact job tab, login/risk state, and one selected action tier.
+- CONFIRM reruns preflight, atomically reserves the Asia/Shanghai daily unit, records the write boundary and both needed component attempts, then sends one leased content command.
+- Reservations distinguish unused from write-started. Only unused reservations may be released; retries for one opportunity reuse its reservation.
+- The configurable Liepin daily limit defaults to 150 and accepts 1 through 500.
+- DOM interaction is restricted to the job-bound Liepin adapter. It prefers the primary `chat-chat` action, reuses an already-open chat surface, and never searches the whole page for an arbitrary composer/send pair.
+- Liepin's first contact action may send its own default greeting. That text is not JobFlow greeting evidence.
+- `发简历` may open an attachment picker. Exactly one preselected resume plus the explicit statement that the default online resume is included is an accepted `platform_default` confirmation; otherwise stop.
+- `已沟通` is not formal application evidence. A new or existing resume card inside the current job's unique chat surface is application evidence.
+- Greeting verification requires a non-input visible leaf inside the unique chat surface whose normalized text exactly equals the confirmed draft.
+- Result events store only bounded evidence codes/counts/lengths and revision/hash references, never DOM, Cookie, recruiter identifiers, or duplicate message content.
 
 Environment:
 
@@ -167,6 +200,7 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 | --- | --- |
 | Unknown/extra runtime field | Reject before command dispatch |
 | Missing or malformed persisted run/scan | Return null; do not resume |
+| In-memory batch run has an unknown or detail-only candidate field | Reject before overwriting the stored run |
 | Content script requests storage/token | No API exists; storage is TRUSTED_CONTEXTS |
 | User ID changes on current Chrome profile | Clear previous device settings, run, scan, and BYOK |
 | Cross-user table/RPC access | RLS or ownership check returns 42501 |
@@ -203,11 +237,21 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 | Stored retry has no active approved fact or selected route credential | Reject before provider work |
 | Stored retry downstream model call fails | Persist a bounded safe reason, refresh UI, and restore retry |
 | Stored retry succeeds | Persist evaluation/draft outcome and refresh UI without opening a platform tab |
+| Reviewed-send request originates from content/Liepin | Reject before loading backend opportunity or draft data |
+| PREPARE succeeds | Persist awaiting_confirmation; consume no daily unit and perform no Liepin click/fill |
+| Final preflight differs or fails | Stop before write; release any unused reservation |
+| Content lease/hash differs | Reject without platform interaction |
+| `聊一聊` sends a platform default greeting | Record application/contact attempt only; do not treat it as the reviewed custom greeting |
+| One selected attachment + `立即投递` | Send already-selected default/attachment resumes, then require a rendered resume card for verified application |
+| `已沟通` without resume evidence | Keep application attempted/unverified |
+| Exact reviewed text appears as outbound chat content | Mark greeting verified |
+| One component verified | Derive partial and retry only the missing component |
+| Both components verified | Derive succeeded and hide replay controls |
 
 ### 5. Good/Base/Bad Cases
 
 - Good: user A scans job 123, Edge reloads user A active profile through RLS, stores one evaluation and one evidence-backed draft, and user B sees none of it.
-- Base: a signed-out/default build renders account setup and draft-only status but cannot start backend work.
+- Base: a signed-out/default build renders account setup but cannot start backend or reviewed-send work.
 - Good: the same platform job ID appears on another page; metadata updates and no model call repeats.
 - Good: a model-excluded record receives a user_override event and generation-only processing while the original exclusion stays visible.
 - Good: resume import immediately shows local parsing/storage/model stages and prevents a second import until completion.
@@ -221,6 +265,11 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 - Base: a valid stored retry produces a grounded exclusion or review; the UI reports the updated record rather than falsely claiming a draft.
 - Bad: send stored JD or profile content in `RETRY_STORED_OPPORTUNITY`, or duplicate post-detail logic in the UI.
 - Bad: rely on a Zod maximum that the provider prompt never states, or accept paraphrased evidence that cannot be located in the JD.
+- Good: PREPARE observes one job-bound primary action and returns awaiting confirmation with zero quota and zero platform writes.
+- Good: Liepin sends its default first-contact text, JobFlow later verifies its own exact custom message and a rendered resume card as two separate facts.
+- Good: a partial record with verified greeting reopens the existing chat only to verify/send the missing application; it never resends the greeting.
+- Bad: interpret `dispatchEvent()` return value, a completed click promise, `已沟通`, or absence of an exception as successful application.
+- Bad: choose the first textarea or `发送` text from the whole document instead of a unique chat-local composer/control pair.
 - Bad: store a raw BYOK string without ownerId or allow content-script storage access.
 - Bad: update current_status directly from UI or delete the event that explains it.
 - Bad: add https://*/* for custom providers; provider traffic leaves through the Edge Function.
@@ -237,6 +286,7 @@ For every contract change, update the nearest focused test and rerun the full ga
 
 - tests/contracts.test.ts: RuntimeRequest and build/Endpoint schemas.
 - tests/storage.test.ts: device owner, BYOK isolation, malformed persisted data.
+- tests/batch-persistence.test.ts: accepted details keep the stored batch schema valid and terminal first-item outcomes advance to the next queued item.
 - tests/domain.test.ts and tests/batch.test.ts: exhaustive projections and transitions.
 - tests/filters.test.ts: clear, negative, optional/preferred, and ambiguous rule language.
 - tests/prompt.test.ts and tests/resume.test.ts: evidence and content validation.
@@ -250,6 +300,10 @@ For every contract change, update the nearest focused test and rerun the full ga
 - tests/prompt.test.ts: both client and real Edge prompts enumerate output cardinalities, discriminator values, and verbatim-evidence rules.
 - tests/stored-retry.test.ts: strict owner/status/JD/profile/credential preconditions, shared processing, bounded failure persistence, and no `chrome.tabs.create`.
 - tests/options-ui.test.ts: stored retry busy/duplicate/success/failure behavior and record refresh.
+- tests/reviewed-send-content.test.ts: successful preflight lease and draft hash are mandatory before execute.
+- tests/liepin.test.ts: primary/secondary action tiering, open-chat reuse, disabled composer, selected resume confirmation, exact message/resume evidence, and false-positive rejection.
+- tests/domain.test.ts: independent component projection, verified immutability, partial/succeeded, and reviewed retry from failed to attempted.
+- supabase/tests/003_reviewed_delivery.test.sql: owner/cross-user, stale draft, Asia/Shanghai quota, reservation release/write-start, request idempotency, and component projection.
 - tests/liepin.test.ts: sanitized list/detail/login/risk DOM.
 - tests/safety.test.ts: exact manifest, no host writes, no personal defaults.
 - supabase/tests: owner success, cross-user failure, protected columns, RPC state guards, identity, idempotency, deletion.
@@ -312,4 +366,15 @@ await chrome.tabs.create({ url: opportunity.canonicalUrl });
 const opportunity = await loadOwnedFailedOpportunity(opportunityId);
 const job = detailJobSchema.parse(detailJobFromOpportunity(opportunity));
 await processPostDetail(opportunity.id, job, settings, activeProfile);
+~~~
+
+For reviewed send, never expose a generic content command:
+
+~~~typescript
+// Wrong: page content chooses the target and arbitrary action.
+await chrome.runtime.sendMessage({ type: "LIVE_ACTION", selector, text });
+
+// Correct: trusted options binds the authoritative revision, then content consumes one job-bound lease.
+await sendCommand({ type: "PREPARE_REVIEWED_SEND", opportunityId, draftRevisionId, draftSha256 });
+await sendCommand({ type: "CONFIRM_REVIEWED_SEND", opportunityId, draftRevisionId, draftSha256 });
 ~~~

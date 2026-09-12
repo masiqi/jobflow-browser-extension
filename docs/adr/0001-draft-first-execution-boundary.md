@@ -26,7 +26,7 @@ The product direction includes three distinct execution policies rather than one
 2. `reviewed_send`: a job seeker may explicitly send one message or a selected batch after review.
 3. `automatic_send`: messages may be sent without per-message or per-batch approval.
 
-Only `draft_only` is authorized for the current implementation. `reviewed_send` and `automatic_send` require separate product decisions, implementation milestones, safety tests, and manual browser acceptance before they can be enabled. A persisted setting alone must never unlock either sending policy.
+At the first acceptance milestone, only `draft_only` was authorized. `reviewed_send` and `automatic_send` require separate product decisions, implementation milestones, safety tests, and manual browser acceptance before they can be enabled. A persisted setting alone must never unlock either sending policy.
 
 ## Consequences
 
@@ -35,3 +35,12 @@ Only `draft_only` is authorized for the current implementation. `reviewed_send` 
 - The outbox should support selection now, but send controls must not perform platform writes in the draft-only milestone.
 - Future single and batch sending can share one reviewed-send workflow and evidence model.
 - Existing simulated ledger entries cannot be interpreted as sent messages or successful applications.
+
+## Amendment: single-opportunity reviewed send
+
+- Date: 2026-09-11
+- Status: Accepted and manually verified
+
+The user separately approved `reviewed_send` for one opportunity at a time. The management page owns a two-stage prepare/confirm interaction; the side panel, list scan, batch generation, and page-load paths cannot initiate live actions. Each confirmation is bound to an owned opportunity plus the current draft revision and SHA-256.
+
+Application and greeting results are persisted independently as attempted, verified, or failed. A delivery is complete only when both components have platform-read evidence. Batch and automatic sending remain unauthorized.

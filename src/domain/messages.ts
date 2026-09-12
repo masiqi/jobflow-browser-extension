@@ -122,8 +122,31 @@ export const extensionSettingsSchema = z.object({
   rules: ruleSettingsSchema,
   model: modelSettingsSchema,
   maxJobsPerBatch: z.number().int().min(1).max(20),
+  dailySendLimit: z.number().int().min(1).max(500),
   detailTimeoutSeconds: z.number().int().min(15).max(180),
   launcherVisible: z.boolean()
+}).strict();
+
+const reviewedSendIdentitySchema = z.object({
+  opportunityId: z.string().uuid(),
+  draftRevisionId: z.string().uuid(),
+  draftSha256: z.string().regex(/^[a-f0-9]{64}$/)
+}).strict();
+
+export const liepinReviewedSendPreflightCommandSchema = z.object({
+  type: z.literal("CONTENT_REVIEWED_SEND_PREFLIGHT"),
+  leaseId: z.string().uuid(),
+  platformJobId: z.string().min(1).max(128)
+}).strict();
+
+export const liepinReviewedSendExecuteCommandSchema = z.object({
+  type: z.literal("CONTENT_REVIEWED_SEND_EXECUTE"),
+  leaseId: z.string().uuid(),
+  platformJobId: z.string().min(1).max(128),
+  draftText: z.string().min(1).max(200),
+  draftSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  needsApplication: z.boolean(),
+  needsGreeting: z.boolean()
 }).strict();
 
 const sourceKindSchema = z.enum(["pdf", "docx", "text", "markdown", "pasted"]);
@@ -179,6 +202,8 @@ export const runtimeRequestSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("DETAIL_READY"), job: detailJobSchema, leaseId: z.string().uuid() }).strict(),
   z.object({ type: z.literal("DETAIL_FAILED"), jobId: z.string().max(128), leaseId: z.string().uuid(), error: z.string().max(500) }).strict(),
   z.object({ type: z.literal("RETRY_STORED_OPPORTUNITY"), opportunityId: z.string().uuid() }).strict(),
+  reviewedSendIdentitySchema.extend({ type: z.literal("PREPARE_REVIEWED_SEND") }).strict(),
+  reviewedSendIdentitySchema.extend({ type: z.literal("CONFIRM_REVIEWED_SEND") }).strict(),
   z.object({ type: z.literal("EDIT_DRAFT"), opportunityId: z.string().uuid(), text: z.string().min(1).max(200) }).strict(),
   z.object({ type: z.literal("REGENERATE_DRAFT"), opportunityId: z.string().uuid() }).strict(),
   z.object({ type: z.literal("REVIEW_DECISION"), opportunityId: z.string().uuid(), decision: z.enum(["continue_generation", "permanently_exclude"]) }).strict(),

@@ -24,7 +24,7 @@ For the first draft-only milestone:
 
 A future automatic execution policy may begin controlled discovery, filtering, generation, and submit-and-contact processing when a user opens a supported result page. It may later include pagination and scrolling but must reuse the same queue, identity, evidence, quota, stop, and recovery contracts.
 
-Every future reviewed or automatic submit-and-contact workflow has a per-user, per-platform daily limit. The initial Liepin default is 150 opportunities per Asia/Shanghai calendar day, and a user may configure a lower or higher value. It is a product setting, not a claim about Liepin's official allowance.
+Every reviewed or automatic submit-and-contact workflow has a per-user, per-platform daily limit. Single-opportunity Liepin reviewed-send now defaults to 150 opportunities per Asia/Shanghai calendar day, and a user may configure a value from 1 to 500. It is a product setting, not a claim about Liepin's official allowance.
 
 Drafting and dry-run activity do not consume this limit. Immediately before the first real platform write for an opportunity, the system atomically reserves one daily unit. If no platform write begins, the reservation is released. Once either application or greeting write begins, the unit remains consumed regardless of full success, failure, or partial completion. Retrying the missing component for the same platform job ID does not consume another unit, and editing the configured limit does not reset recorded usage.
 
@@ -36,3 +36,9 @@ The user-selectable maximum, any server-controlled emergency ceiling, and automa
 - Users can inspect cost exposure before model calls begin.
 - Future automation does not require a second queue or ledger.
 - Live implementation remains separately prohibited until explicitly approved and manually accepted.
+
+## Amendment: reviewed-send quota activation
+
+- Date: 2026-09-11
+
+The reservation model is active for single-opportunity reviewed-send. A read-only preflight consumes no unit. The server reserves one unit before the possible write boundary, distinguishes reserved from write-started, permits release only before write start, and reuses the same opportunity reservation during evidence-aware recovery. Batch and automatic live limits remain deferred.

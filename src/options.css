@@ -154,8 +154,8 @@ button:disabled, input:disabled, textarea:disabled { cursor: not-allowed; opacit
 .record-row b, .record-row small { display: block; overflow-wrap: anywhere; }
 .record-row small, .record-row time { color: #6c7884; margin-top: 4px; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #768594; }
-.status-dot.draft_ready { background: #278356; }
-.status-dot.review_required { background: #c38414; }
+.status-dot.draft_ready, .status-dot.succeeded { background: #278356; }
+.status-dot.review_required, .status-dot.awaiting_confirmation, .status-dot.partial { background: #c38414; }
 .status-dot.model_excluded, .status-dot.deterministic_excluded, .status-dot.user_excluded, .status-dot.failed { background: #bc4942; }
 .record-detail { min-width: 0; padding: 20px; overflow: auto; }
 .detail-heading { display: flex; justify-content: space-between; align-items: start; gap: 14px; padding-bottom: 18px; border-bottom: 1px solid #dce2e7; }
@@ -169,6 +169,18 @@ button:disabled, input:disabled, textarea:disabled { cursor: not-allowed; opacit
 .stored-retry-status.progress { color: #315066; }
 .stored-retry-status.success { color: #17633c; }
 .stored-retry-status.error { color: #9c342e; }
+.daily-limit { display: block; max-width: 260px; margin: 16px 0 0; color: #53616f; }
+.daily-limit input { display: block; margin-top: 5px; }
+.reviewed-send { background: #fff8e8; margin: 0 -20px; padding: 16px 20px; border-bottom: 1px solid #dce2e7; }
+.delivery-details { display: grid; grid-template-columns: 90px minmax(0, 1fr); margin: 10px 0; }
+.delivery-details dt, .delivery-details dd { margin: 0; padding: 5px 0; }
+.delivery-details dt { color: #687582; }
+.write-warning { margin: 8px 0; color: #8c5f11; line-height: 1.5; }
+.reviewed-send-status { margin: 10px 0 0; line-height: 1.5; overflow-wrap: anywhere; }
+.reviewed-send-status:empty { display: none; }
+.reviewed-send-status.progress, .reviewed-send-status.ready { color: #315066; }
+.reviewed-send-status.success { color: #17633c; }
+.reviewed-send-status.error { color: #9c342e; }
 .recruiter-metadata { margin: 0 0 10px; color: #4d5d6b; }
 .job-description { max-height: 420px; overflow: auto; padding: 12px 0; border-top: 1px solid #e0e5ea; white-space: pre-wrap; line-height: 1.7; overflow-wrap: anywhere; }
 .detail-hash { display: block; margin-top: 8px; color: #73808c; overflow-wrap: anywhere; }

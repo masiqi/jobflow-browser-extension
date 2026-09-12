@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "JobFlow 猎聘草稿助手",
   "version": "0.2.0",
-  "description": "读取猎聘公开页面并生成可审核草稿；不会发送或投递",
+  "description": "读取猎聘公开页面、生成草稿，并支持管理台逐条确认投递",
   "permissions": [
     "storage",
     "tabs",

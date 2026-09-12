@@ -50,7 +50,8 @@ function appState(scanPreview: ScanPreview | null = null): AppState {
     opportunities: [],
     evaluations: [],
     events: [],
-    drafts: []
+    drafts: [],
+    deliveries: []
   };
 }
 
@@ -228,5 +229,30 @@ describe("side-panel scan interaction", () => {
 
     expect(document.querySelector(".run-failure")?.textContent).toContain(reason);
     expect(document.querySelector(".record-reason")?.textContent).toContain(reason);
+  });
+
+  it("projects completed delivery status and reason over the draft opportunity summary", async () => {
+    const scanPreview = preview(1);
+    const opportunity = failedOpportunity(scanPreview, "草稿已生成");
+    opportunity.status = "draft_ready";
+    const state = appState(scanPreview);
+    state.opportunities = [opportunity];
+    state.deliveries = [{
+      opportunityId: opportunity.id,
+      platform: "liepin",
+      platformJobId: opportunity.platformJobId,
+      resumeMode: "platform_default",
+      overallStatus: "succeeded",
+      applicationStatus: "verified",
+      greetingStatus: "verified",
+      latestReason: "正式投递已从猎聘页面验证",
+      updatedAt: "2026-09-11T00:00:02.000Z"
+    }];
+    const sendMessage = vi.fn(async () => ({ ok: true, data: state }));
+    await openSidePanel(sendMessage);
+
+    expect(document.querySelector(".record")?.textContent).toContain("已投递并联系");
+    expect(document.querySelector(".record-reason")?.textContent).toContain("正式投递已从猎聘页面验证");
+    expect(document.querySelector(".record-reason")?.textContent).not.toContain("草稿已生成");
   });
 });

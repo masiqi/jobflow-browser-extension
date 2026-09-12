@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { applyDeliveryPatch, deriveDeliveryOverallStatus } from "../src/domain/delivery";
 import { canContinueAsException, projectOpportunity, projectRuleEvidence } from "../src/domain/events";
-import type { OpportunityEvent, OpportunityRecord } from "../src/types";
+import type { DeliveryRecord, OpportunityEvent, OpportunityRecord } from "../src/types";
 
 const initial: OpportunityRecord = {
   id: "00000000-0000-4000-8000-000000000001",
@@ -78,5 +79,41 @@ describe("opportunity projection", () => {
       reason: "职位要求长期出差",
       evidence: ["需要长期出差"]
     }]);
+  });
+});
+
+describe("reviewed delivery projection", () => {
+  const delivery: DeliveryRecord = {
+    opportunityId: initial.id,
+    platform: "liepin",
+    platformJobId: initial.platformJobId,
+    resumeMode: "platform_default",
+    overallStatus: "ready",
+    applicationStatus: "pending",
+    greetingStatus: "pending",
+    updatedAt: "2026-01-01T00:00:00.000Z"
+  };
+
+  it("derives complete only from independent application and greeting evidence", () => {
+    expect(deriveDeliveryOverallStatus("verified", "verified")).toBe("succeeded");
+    expect(deriveDeliveryOverallStatus("verified", "attempted")).toBe("partial");
+    expect(deriveDeliveryOverallStatus("attempted", "verified")).toBe("partial");
+    expect(deriveDeliveryOverallStatus("attempted", "attempted")).toBe("in_progress");
+    expect(deriveDeliveryOverallStatus("failed", "pending")).toBe("failed");
+  });
+
+  it("does not replay an already verified component", () => {
+    const verified = applyDeliveryPatch(delivery, { applicationStatus: "verified" }, "2026-01-01T00:00:01.000Z");
+    const replayed = applyDeliveryPatch(verified, { applicationStatus: "attempted", greetingStatus: "verified" }, "2026-01-01T00:00:02.000Z");
+    expect(replayed.applicationStatus).toBe("verified");
+    expect(replayed.greetingStatus).toBe("verified");
+    expect(replayed.overallStatus).toBe("succeeded");
+  });
+
+  it("allows an explicitly reviewed retry to move a failed component back to attempted", () => {
+    const failed = applyDeliveryPatch(delivery, { greetingStatus: "failed" }, "2026-01-01T00:00:01.000Z");
+    const retried = applyDeliveryPatch(failed, { greetingStatus: "attempted" }, "2026-01-01T00:00:02.000Z");
+    expect(retried.greetingStatus).toBe("attempted");
+    expect(retried.overallStatus).toBe("in_progress");
   });
 });

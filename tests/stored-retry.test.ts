@@ -88,6 +88,8 @@ async function loadBackground(): Promise<void> {
   createTab = vi.fn();
   vi.stubGlobal("chrome", {
     runtime: {
+      id: "jobflow-extension-id",
+      getURL: vi.fn((path: string) => "chrome-extension://jobflow-extension-id/" + path),
       onMessage: { addListener: vi.fn((listener) => { runtimeListener = listener; }) },
       onStartup: { addListener: vi.fn() },
       onInstalled: { addListener: vi.fn() },
@@ -223,6 +225,28 @@ describe("stored opportunity retry", () => {
       operation: "record_failure",
       payload: { opportunityId, errorCode: "模型服务请求失败" }
     }), undefined);
+    expect(createTab).not.toHaveBeenCalled();
+  });
+
+  it("rejects reviewed-send initiation from a content-script sender before backend access", async () => {
+    const response = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      runtimeListener?.(
+        {
+          type: "PREPARE_REVIEWED_SEND",
+          opportunityId,
+          draftRevisionId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          draftSha256: "a".repeat(64)
+        },
+        {
+          id: "jobflow-extension-id",
+          url: "https://www.liepin.com/a/1980000401.shtml"
+        } as chrome.runtime.MessageSender,
+        (value) => resolve(value as { ok: boolean; error?: string })
+      );
+    });
+
+    expect(response).toEqual({ ok: false, error: "只能从扩展管理页发起人工确认发送" });
+    expect(backend.listOpportunities).not.toHaveBeenCalled();
     expect(createTab).not.toHaveBeenCalled();
   });
 });

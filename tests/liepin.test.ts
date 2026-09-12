@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import { detailJobSchema } from "../src/domain/messages";
 import {
   detectLiepinBlockedPage,
+  executeLiepinReviewedSend,
   extractLiepinDetail,
   isLiepinListPage,
+  preflightLiepinReviewedSend,
   scanLiepinList
 } from "../src/platforms/liepin";
 
@@ -63,5 +65,295 @@ describe("Liepin list extraction", () => {
     expect(detectLiepinBlockedPage()).toBe("login_required");
     document.body.innerHTML = "<main>访问异常，请完成安全验证并拖动滑块</main>";
     expect(detectLiepinBlockedPage()).toBe("risk_control");
+  });
+
+  it("preflights exactly one primary reviewed-send action without interacting", () => {
+    let clicked = 0;
+    document.body.innerHTML = `
+      <main>
+        <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+        <a class="btn-chat" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+      </main>`;
+    document.querySelector(".btn-main")?.addEventListener("click", () => {
+      clicked += 1;
+    });
+    expect(preflightLiepinReviewedSend(document, "https://www.liepin.com/a/1980000301.shtml", "1980000301"))
+      .toMatchObject({ ok: true, actionTier: "primary", resumeMode: "platform_default" });
+    expect(clicked).toBe(0);
+  });
+
+  it("fails closed for ambiguous selected-tier actions and resume pickers", () => {
+    document.body.innerHTML = `
+      <main>
+        <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+        <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+      </main>`;
+    expect(preflightLiepinReviewedSend(document, "https://www.liepin.com/a/1980000301.shtml", "1980000301"))
+      .toMatchObject({ ok: false, blocker: "ambiguous_action" });
+    document.body.innerHTML = `
+      <main>
+        <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+        <section>请选择简历 合成简历 A 合成简历 B</section>
+      </main>`;
+    expect(preflightLiepinReviewedSend(document, "https://www.liepin.com/a/1980000301.shtml", "1980000301"))
+      .toMatchObject({ ok: false, blocker: "ambiguous_resume" });
+  });
+
+  it("executes one reviewed action, sends a greeting, and verifies only rendered outbound evidence", async () => {
+    const draft = "您好，我关注到这个合成智能体岗位，过往做过 TypeScript 任务平台和稳定性建设，想进一步沟通匹配度。";
+    document.body.innerHTML = `
+      <main>
+        <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+        <section id="chat"></section>
+      </main>`;
+    document.querySelector(".btn-main")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      document.querySelector("#chat")!.innerHTML = `
+        <div data-jobid="1980000301">已投递 1980000301</div>
+        <textarea></textarea>
+        <button>发送</button>`;
+      document.querySelector("button")?.addEventListener("click", () => {
+        const text = (document.querySelector("textarea") as HTMLTextAreaElement).value;
+        const bubble = document.createElement("div");
+        bubble.className = "outgoing-row";
+        bubble.textContent = text;
+        document.querySelector("#chat")?.append(bubble);
+      });
+    });
+    const result = await executeLiepinReviewedSend(document, "https://www.liepin.com/a/1980000301.shtml", "1980000301", draft);
+    expect(result).toMatchObject({
+      ok: true,
+      application: "verified",
+      greeting: "verified"
+    });
+    expect(result.evidenceCodes).toEqual(expect.arrayContaining([
+      "application_status_verified",
+      "outbound_greeting_exact_match"
+    ]));
+  });
+
+  it("does not fill or resend a greeting that is already verified", async () => {
+    let sendClicks = 0;
+    document.body.innerHTML = `
+      <main>
+        <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+        <section id="chat"></section>
+      </main>`;
+    document.querySelector(".btn-main")?.addEventListener("click", () => {
+      document.querySelector("#chat")!.innerHTML = `
+        <div data-jobid="1980000301">已投递 1980000301</div>
+        <textarea></textarea>
+        <button>发送</button>`;
+      document.querySelector("button")?.addEventListener("click", () => {
+        sendClicks += 1;
+      });
+    });
+    const result = await executeLiepinReviewedSend(
+      document,
+      "https://www.liepin.com/a/1980000301.shtml",
+      "1980000301",
+      "这条已验证招呼语不应重复发送。",
+      true,
+      false
+    );
+    expect(result).toMatchObject({ application: "verified", greeting: "verified" });
+    expect(sendClicks).toBe(0);
+    expect((document.querySelector("textarea") as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("uses only the newly opened chat surface and never fills an existing page input", async () => {
+    const draft = "您好，这是一条只允许写入新聊天面板的合成招呼语。";
+    document.body.innerHTML = `
+      <input id="page-search" type="text">
+      <button id="page-send">发送</button>
+      <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+      <section id="chat-host"></section>`;
+    let pageSendClicks = 0;
+    let chatSendClicks = 0;
+    document.querySelector("#page-send")?.addEventListener("click", () => { pageSendClicks += 1; });
+    document.querySelector(".btn-main")?.addEventListener("click", () => {
+      document.querySelector("#chat-host")!.innerHTML = `
+        <section class="chat-panel">
+          <div data-jobid="1980000301">已投递 1980000301</div>
+          <textarea class="chat-composer"></textarea>
+          <button class="chat-send">发送</button>
+        </section>`;
+      document.querySelector(".chat-send")?.addEventListener("click", () => {
+        chatSendClicks += 1;
+        const bubble = document.createElement("div");
+        bubble.className = "message-self";
+        bubble.textContent = (document.querySelector(".chat-composer") as HTMLTextAreaElement).value;
+        document.querySelector(".chat-panel")?.append(bubble);
+      });
+    });
+
+    const result = await executeLiepinReviewedSend(
+      document,
+      "https://www.liepin.com/a/1980000301.shtml",
+      "1980000301",
+      draft
+    );
+
+    expect(result.greeting).toBe("verified");
+    expect((document.querySelector("#page-search") as HTMLInputElement).value).toBe("");
+    expect(pageSendClicks).toBe(0);
+    expect(chatSendClicks).toBe(1);
+  });
+
+  it("does not count a conversation-only state as formal application evidence", async () => {
+    document.body.innerHTML = `
+      <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+      <section id="state"></section>`;
+    document.querySelector(".btn-main")?.addEventListener("click", () => {
+      document.querySelector("#state")!.innerHTML = '<div data-jobid="1980000301">已沟通 1980000301</div>';
+    });
+
+    const result = await executeLiepinReviewedSend(
+      document,
+      "https://www.liepin.com/a/1980000301.shtml",
+      "1980000301",
+      "合成招呼语",
+      true,
+      false
+    );
+
+    expect(result.application).toBe("attempted");
+    expect(result.ok).toBe(false);
+  });
+
+  it("stops after the native action when resume selection becomes ambiguous", async () => {
+    let sendClicks = 0;
+    document.body.innerHTML = `
+      <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+      <section id="chat"></section>`;
+    document.querySelector(".btn-main")?.addEventListener("click", () => {
+      document.querySelector("#chat")!.innerHTML = `
+        <div>请选择简历</div><div class="resume-option">合成简历 A</div><div class="resume-option">合成简历 B</div>
+        <textarea></textarea><button>发送</button>`;
+      document.querySelector("button")?.addEventListener("click", () => { sendClicks += 1; });
+    });
+
+    const result = await executeLiepinReviewedSend(
+      document,
+      "https://www.liepin.com/a/1980000301.shtml",
+      "1980000301",
+      "不应发送的合成招呼语"
+    );
+
+    expect(result.greeting).toBe("failed");
+    expect(result.evidenceCodes).toContain("ambiguous_resume");
+    expect(sendClicks).toBe(0);
+  });
+
+  it("reuses an open chat, sends the default resume, and does not click chat again", async () => {
+    const draft = "您好，这是复用现有聊天窗口后发送的合成招呼语。";
+    let chatActionClicks = 0;
+    let resumeClicks = 0;
+    let sendClicks = 0;
+    document.body.innerHTML = `
+      <main>
+        <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+        <section class="chat-panel">
+          <div class="resume-action"><span>发简历</span></div>
+          <textarea class="chat-composer"></textarea>
+          <button class="chat-send" disabled>发送</button>
+          <div class="messages"></div>
+        </section>
+      </main>`;
+    document.querySelector(".btn-main")?.addEventListener("click", () => { chatActionClicks += 1; });
+    document.querySelector(".resume-action span")?.addEventListener("click", () => {
+      resumeClicks += 1;
+      const evidence = document.createElement("div");
+      evidence.dataset.jobid = "1980000301";
+      evidence.textContent = "简历已发送 1980000301";
+      document.querySelector(".messages")?.append(evidence);
+    });
+    document.querySelector(".chat-composer")?.addEventListener("input", () => {
+      (document.querySelector(".chat-send") as HTMLButtonElement).disabled = false;
+    });
+    document.querySelector(".chat-send")?.addEventListener("click", () => {
+      sendClicks += 1;
+      const bubble = document.createElement("div");
+      bubble.className = "outgoing-row";
+      bubble.textContent = (document.querySelector(".chat-composer") as HTMLTextAreaElement).value;
+      document.querySelector(".messages")?.append(bubble);
+    });
+
+    const result = await executeLiepinReviewedSend(
+      document,
+      "https://www.liepin.com/a/1980000301.shtml",
+      "1980000301",
+      draft
+    );
+
+    expect(result).toMatchObject({ ok: true, application: "verified", greeting: "verified" });
+    expect(result.evidenceCodes).toContain("chat_surface_reused");
+    expect(chatActionClicks).toBe(0);
+    expect(resumeClicks).toBe(1);
+    expect(sendClicks).toBe(1);
+  });
+
+  it("resumes from one selected attachment and verifies the immediate application", async () => {
+    let applicationClicks = 0;
+    document.body.innerHTML = `
+      <section class="resume-dialog">
+        <h2>选择附件简历</h2>
+        <p>招聘方将同时收到您的默认在线简历和附件简历</p>
+        <label><input type="radio" name="resume" checked>合成附件简历</label>
+        <button>立即投递</button>
+      </section>
+      <section class="chat-messages"></section>`;
+    document.querySelector("button")?.addEventListener("click", () => {
+      applicationClicks += 1;
+      document.querySelector(".resume-dialog")?.remove();
+      const evidence = document.createElement("div");
+      evidence.textContent = "简历已发送";
+      document.querySelector(".chat-messages")?.append(evidence);
+    });
+
+    expect(preflightLiepinReviewedSend(
+      document,
+      "https://www.liepin.com/a/1980000301.shtml",
+      "1980000301"
+    )).toMatchObject({ ok: true, actionTier: "application_confirmation" });
+
+    const result = await executeLiepinReviewedSend(
+      document,
+      "https://www.liepin.com/a/1980000301.shtml",
+      "1980000301",
+      "已经发送过的合成招呼语",
+      true,
+      false
+    );
+
+    expect(result).toMatchObject({ ok: true, application: "verified", greeting: "verified" });
+    expect(applicationClicks).toBe(1);
+  });
+
+  it("verifies an existing job-bound resume card without sending the resume again", async () => {
+    let resumeClicks = 0;
+    document.body.innerHTML = `
+      <main>
+        <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">继续聊</a>
+        <section class="chat-panel">
+          <div class="messages"><div>这是我的简历，合适的话可以随时联系我</div><div>在线简历</div><div>附件简历</div></div>
+          <div class="resume-action"><span>发简历</span></div>
+          <textarea></textarea><button disabled>发送</button>
+        </section>
+      </main>`;
+    document.querySelector(".resume-action span")?.addEventListener("click", () => { resumeClicks += 1; });
+
+    const result = await executeLiepinReviewedSend(
+      document,
+      "https://www.liepin.com/a/1980000301.shtml",
+      "1980000301",
+      "已经发送过的合成招呼语",
+      true,
+      false
+    );
+
+    expect(result).toMatchObject({ ok: true, application: "verified", greeting: "verified" });
+    expect(result.evidenceCodes).toContain("chat_surface_reused");
+    expect(resumeClicks).toBe(0);
   });
 });

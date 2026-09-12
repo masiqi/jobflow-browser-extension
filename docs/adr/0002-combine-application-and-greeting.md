@@ -28,7 +28,7 @@ When Liepin exposes a native combined operation, the adapter should prefer it on
 4. Preserve partial completion if greeting delivery cannot be verified.
 5. On retry, execute only the component without success evidence.
 
-This decision defines future behavior only. It does not authorize implementation or activation of either Liepin write operation in the current draft-only milestone.
+This decision did not authorize the original draft-only milestone. The separately approved single-opportunity reviewed-send amendment in ADR 0001 now activates it only through explicit management-page confirmation.
 
 ## Consequences
 
@@ -36,4 +36,15 @@ This decision defines future behavior only. It does not authorize implementation
 - The ledger and future state machine need separate application and greeting sub-statuses.
 - A batch summary must show full success, partial completion, and failure separately.
 - Adapters must distinguish an attempted action from a verified outcome and make retries idempotent at component level.
-- Exact user-facing partial-failure messaging remains to be designed before reviewed sending is implemented.
+- User-facing delivery details show application, greeting, and overall status separately; attempted evidence is never labeled successful.
+
+## Liepin observed sequence
+
+The first reviewed-send acceptance on 2026-09-11 established a platform-specific exception to the preferred order:
+
+1. Liepin's `聊一聊` action creates the conversation and immediately sends Liepin's own default greeting.
+2. The open conversation exposes `发简历`; it opens a confirmation that identifies the selected attachment and states that the default online resume is also delivered.
+3. `立即投递` sends those already-selected resumes.
+4. JobFlow sends its reviewed custom greeting and verifies the exact outbound rendered text.
+
+The platform default greeting is not JobFlow greeting evidence. A rendered resume card is application evidence; `已沟通` alone is not. Recovery reuses the open conversation and skips any component already verified.

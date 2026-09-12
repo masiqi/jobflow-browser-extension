@@ -4,7 +4,10 @@ import type { BatchRun, ExtensionSettings, ScanPreview } from "./types";
 
 export async function loadSettings(): Promise<ExtensionSettings> {
   const value: unknown = (await chrome.storage.local.get(STORAGE_KEYS.settings))[STORAGE_KEYS.settings];
-  const parsed = extensionSettingsSchema.safeParse(value);
+  const normalized = value && typeof value === "object"
+    ? { ...structuredClone(DEFAULT_SETTINGS), ...(value as Record<string, unknown>) }
+    : value;
+  const parsed = extensionSettingsSchema.safeParse(normalized);
   return parsed.success ? parsed.data : structuredClone(DEFAULT_SETTINGS);
 }
 
@@ -55,8 +58,11 @@ export async function getRun(): Promise<BatchRun | null> {
 }
 
 export async function saveRun(run: BatchRun): Promise<void> {
-  run.updatedAt = new Date().toISOString();
-  await chrome.storage.local.set({ [STORAGE_KEYS.run]: run });
+  const parsed = batchRunSchema.parse({
+    ...run,
+    updatedAt: new Date().toISOString()
+  });
+  await chrome.storage.local.set({ [STORAGE_KEYS.run]: parsed });
 }
 
 export async function getScanPreview(): Promise<ScanPreview | null> {
@@ -66,7 +72,10 @@ export async function getScanPreview(): Promise<ScanPreview | null> {
 }
 
 export async function saveScanPreview(preview: ScanPreview | null): Promise<void> {
-  if (preview) await chrome.storage.local.set({ [STORAGE_KEYS.scanPreview]: preview });
+  if (preview) {
+    const parsed = scanPreviewSchema.parse(preview);
+    await chrome.storage.local.set({ [STORAGE_KEYS.scanPreview]: parsed });
+  }
   else await chrome.storage.local.remove(STORAGE_KEYS.scanPreview);
 }
 

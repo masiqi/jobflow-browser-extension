@@ -55,7 +55,8 @@ try {
   await sidePanel.setViewportSize({ width: 380, height: 800 });
   await sidePanel.goto("chrome-extension://" + extensionId + "/sidepanel.html");
   await sidePanel.getByRole("heading", { name: "JobFlow" }).waitFor();
-  await sidePanel.getByText("仅生成草稿").waitFor();
+  await sidePanel.getByText("草稿与筛选").waitFor();
+  await sidePanel.getByText("真实发送仅在管理台逐条确认").waitFor();
   if (await sidePanel.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)) {
     throw new Error("Side panel has horizontal overflow");
   }

@@ -21,6 +21,453 @@ export function detectLiepinBlockedPage(root: ParentNode = document): "login_req
   return null;
 }
 
+export type LiepinReviewedSendBlocker =
+  | "login_required"
+  | "risk_control"
+  | "wrong_job"
+  | "not_detail_page"
+  | "missing_action"
+  | "ambiguous_action"
+  | "disabled_action"
+  | "ambiguous_resume";
+
+export interface LiepinReviewedSendPreflight {
+  ok: boolean;
+  platformJobId: string;
+  resumeMode: "platform_default";
+  actionTier?: "primary" | "secondary" | "application_confirmation";
+  blocker?: LiepinReviewedSendBlocker;
+  reason?: string;
+}
+
+export interface LiepinReviewedSendResult {
+  ok: boolean;
+  application: "attempted" | "verified" | "failed";
+  greeting: "attempted" | "verified" | "failed";
+  evidenceCodes: string[];
+  reason?: string;
+}
+
+const normalizeMessageText = (value: string): string => value.replace(/\s+/g, " ").trim();
+
+function isVisibleElement(element: HTMLElement): boolean {
+  if (element.hidden || element.getAttribute("aria-hidden") === "true") return false;
+  const style = element.ownerDocument.defaultView?.getComputedStyle(element);
+  if (style && (style.display === "none" || style.visibility === "hidden" || style.pointerEvents === "none")) return false;
+  return true;
+}
+
+function isDisabledElement(element: HTMLElement): boolean {
+  return element.hasAttribute("disabled")
+    || element.getAttribute("aria-disabled") === "true"
+    || /\b(disabled|disable)\b/i.test(element.className);
+}
+
+function actionCandidates(root: ParentNode, platformJobId: string, tier: "primary" | "secondary"): HTMLElement[] {
+  const selector = tier === "primary"
+    ? 'a.btn-main[data-selector="chat-chat"],button.btn-main[data-selector="chat-chat"]'
+    : 'a.btn-chat[data-selector="chat-chat"],button.btn-chat[data-selector="chat-chat"]';
+  return [...root.querySelectorAll<HTMLElement>(selector)]
+    .filter((element) => element.dataset.jobid === platformJobId)
+    .filter(isVisibleElement);
+}
+
+function selectAction(root: ParentNode, platformJobId: string): { ok: true; element: HTMLElement; tier: "primary" | "secondary" } | { ok: false; blocker: LiepinReviewedSendBlocker; reason: string } {
+  const primary = actionCandidates(root, platformJobId, "primary");
+  const secondary = primary.length === 0 ? actionCandidates(root, platformJobId, "secondary") : [];
+  const selected = primary.length > 0 ? primary : secondary;
+  const tier = primary.length > 0 ? "primary" : "secondary";
+  if (selected.length === 0) return { ok: false, blocker: "missing_action", reason: "未找到可用的聊一聊入口" };
+  if (selected.length > 1) return { ok: false, blocker: "ambiguous_action", reason: "聊一聊入口不唯一" };
+  if (isDisabledElement(selected[0]!)) return { ok: false, blocker: "disabled_action", reason: "聊一聊入口不可用" };
+  return { ok: true, element: selected[0]!, tier };
+}
+
+type ApplicationConfirmation =
+  | { status: "ready"; control: HTMLElement }
+  | { status: "ambiguous" }
+  | null;
+
+function findApplicationConfirmation(root: ParentNode): ApplicationConfirmation {
+  const source = (root instanceof Document ? root.body?.textContent : root.textContent) || "";
+  const textValue = source.replace(/\s+/g, " ").slice(0, 20_000);
+  const hasPickerText = /请选择简历|选择(?:附件)?简历|切换简历/.test(textValue);
+  const controls = [...root.querySelectorAll<HTMLElement>("button,a,[role=button]")]
+    .filter(isVisibleElement)
+    .filter((element) => !isDisabledElement(element))
+    .filter((element) => elementLabel(element) === "立即投递");
+  if (!hasPickerText && controls.length === 0) return null;
+  if (controls.length !== 1) return { status: "ambiguous" };
+  let scope = controls[0]!.parentElement;
+  while (scope?.parentElement && scope.parentElement !== controls[0]!.ownerDocument.body) {
+    if (/选择(?:附件)?简历/.test(elementLabel(scope))) break;
+    scope = scope.parentElement;
+  }
+  const radios = scope ? [...scope.querySelectorAll<HTMLInputElement>('input[type="radio"]')] : [];
+  const selected = radios.filter((radio) => radio.checked || radio.getAttribute("aria-checked") === "true");
+  if (radios.length > 0 && selected.length !== 1) return { status: "ambiguous" };
+  if (radios.length === 0 && !/默认在线简历|默认简历|当前简历/.test(scope ? elementLabel(scope) : textValue)) {
+    return { status: "ambiguous" };
+  }
+  return { status: "ready", control: controls[0]! };
+}
+
+function hasAmbiguousResumePicker(root: ParentNode): boolean {
+  return findApplicationConfirmation(root)?.status === "ambiguous";
+}
+
+export function preflightLiepinReviewedSend(
+  root: ParentNode = document,
+  href = location.href,
+  platformJobId: string
+): LiepinReviewedSendPreflight {
+  const blocked = detectLiepinBlockedPage(root);
+  if (blocked) {
+    return {
+      ok: false,
+      platformJobId,
+      resumeMode: "platform_default",
+      blocker: blocked,
+      reason: blocked === "risk_control" ? "猎聘页面需要安全验证" : "猎聘页面需要登录"
+    };
+  }
+  if (!/\/(?:job|a)\/\d+\.shtml/i.test(new URL(href).pathname)) {
+    return { ok: false, platformJobId, resumeMode: "platform_default", blocker: "not_detail_page", reason: "当前不是猎聘职位详情页" };
+  }
+  if (jobIdFromUrl(href) !== platformJobId) {
+    return { ok: false, platformJobId, resumeMode: "platform_default", blocker: "wrong_job", reason: "当前详情页职位 ID 不匹配" };
+  }
+  const applicationConfirmation = findApplicationConfirmation(root);
+  if (applicationConfirmation?.status === "ambiguous") {
+    return { ok: false, platformJobId, resumeMode: "platform_default", blocker: "ambiguous_resume", reason: "猎聘默认简历选择不明确" };
+  }
+  if (applicationConfirmation?.status === "ready") {
+    return {
+      ok: true,
+      platformJobId,
+      resumeMode: "platform_default",
+      actionTier: "application_confirmation"
+    };
+  }
+  const action = selectAction(root, platformJobId);
+  if (!action.ok) {
+    return { ok: false, platformJobId, resumeMode: "platform_default", blocker: action.blocker, reason: action.reason };
+  }
+  return {
+    ok: true,
+    platformJobId,
+    resumeMode: "platform_default",
+    actionTier: action.tier
+  };
+}
+
+function dispatchAllowedClick(element: HTMLElement): void {
+  const ViewMouseEvent = element.ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
+  element.dispatchEvent(new ViewMouseEvent("click", {
+    bubbles: true,
+    cancelable: true
+  }));
+}
+
+function setTextControlValue(element: HTMLElement, value: string): void {
+  const view = element.ownerDocument.defaultView;
+  const isTextArea = Boolean(view && element instanceof view.HTMLTextAreaElement);
+  const isInput = Boolean(view && element instanceof view.HTMLInputElement);
+  if (isTextArea || isInput) {
+    const prototype = isTextArea ? view!.HTMLTextAreaElement.prototype : view!.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+    if (setter) setter.call(element, value);
+    else (element as HTMLTextAreaElement | HTMLInputElement).value = value;
+  } else {
+    element.textContent = value;
+  }
+  const ViewInputEvent = element.ownerDocument.defaultView?.InputEvent ?? InputEvent;
+  const ViewEvent = element.ownerDocument.defaultView?.Event ?? Event;
+  element.dispatchEvent(new ViewInputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+  element.dispatchEvent(new ViewEvent("change", { bubbles: true }));
+}
+
+function applicationVerified(
+  root: ParentNode,
+  platformJobId: string,
+  chatEvidenceRoot?: ParentNode
+): boolean {
+  const textValue = ((root instanceof Document ? root.body?.textContent : root.textContent) || "").replace(/\s+/g, " ");
+  const statusPattern = "已投递|投递成功|已申请|申请成功|简历已发送|已发送简历|发送了简历";
+  return new RegExp("(" + statusPattern + ").{0,80}" + platformJobId + "|" + platformJobId + ".{0,80}(" + statusPattern + ")").test(textValue)
+    || [...root.querySelectorAll<HTMLElement>("[data-jobid]")]
+      .filter((element) => element.dataset.jobid === platformJobId)
+      .some((element) => /已投递|投递成功|已申请|申请成功|简历已发送|已发送简历|发送了简历/.test(element.innerText || element.textContent || ""))
+    || Boolean(chatEvidenceRoot && applicationEvidenceTexts(chatEvidenceRoot).size > 0);
+}
+
+function applicationEvidenceTexts(root: ParentNode): Set<string> {
+  return new Set(
+    [...root.querySelectorAll<HTMLElement>("*")]
+      .filter((element) => element.children.length === 0)
+      .filter(isVisibleElement)
+      .map(elementLabel)
+      .filter((value) => /简历(?:已发送|已投递|投递成功)|(?:已发送|已投递|发送了).*简历|个人简历|我的简历|在线简历|附件简历/.test(value))
+  );
+}
+
+function newApplicationEvidence(root: ParentNode, before: Set<string>): boolean {
+  return [...applicationEvidenceTexts(root)].some((value) => !before.has(value));
+}
+
+function elementLabel(element: HTMLElement): string {
+  return normalizeMessageText(
+    element.innerText
+      || element.textContent
+      || element.getAttribute("aria-label")
+      || element.getAttribute("title")
+      || ""
+  );
+}
+
+function visibleTextControls(root: ParentNode): HTMLElement[] {
+  const selectors = [
+    "textarea:not([disabled])",
+    'input[type="text"]:not([disabled])',
+    '[contenteditable="true"]'
+  ];
+  return selectors.flatMap((selector) => [...root.querySelectorAll<HTMLElement>(selector)])
+    .filter(isVisibleElement);
+}
+
+function visibleSendControls(root: ParentNode): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>("button,a")]
+    .filter(isVisibleElement)
+    .filter((element) => elementLabel(element) === "发送");
+}
+
+function findResumeControl(root: ParentNode): HTMLElement | null {
+  const candidates = [...root.querySelectorAll<HTMLElement>("button,a,[role=button],div,span")]
+    .filter(isVisibleElement)
+    .filter((element) => elementLabel(element) === "发简历")
+    .filter((element) => ![...element.children].some((child) => elementLabel(child as HTMLElement) === "发简历"));
+  return candidates.length === 1 ? candidates[0]! : null;
+}
+
+interface LiepinChatSurface {
+  root: HTMLElement;
+  composer: HTMLElement;
+  send: HTMLElement;
+}
+
+function chatSurfaceForComposer(composer: HTMLElement): LiepinChatSurface | null {
+  let scope = composer.parentElement;
+  let selected: LiepinChatSurface | null = null;
+  while (scope && scope !== composer.ownerDocument.body) {
+    const sendControls = visibleSendControls(scope);
+    const textControls = visibleTextControls(scope);
+    if (sendControls.length === 1 && textControls.length === 1 && textControls[0] === composer) {
+      selected = { root: scope, composer, send: sendControls[0]! };
+    }
+    scope = scope.parentElement;
+  }
+  return selected;
+}
+
+function findNewChatSurface(root: ParentNode, existingControls: Set<HTMLElement>): LiepinChatSurface | null {
+  const surfaces = visibleTextControls(root)
+    .filter((control) => !existingControls.has(control))
+    .map(chatSurfaceForComposer)
+    .filter((surface): surface is LiepinChatSurface => Boolean(surface));
+  return surfaces.length === 1 ? surfaces[0]! : null;
+}
+
+function findExistingChatSurface(root: ParentNode): LiepinChatSurface | null {
+  const surfaces = visibleTextControls(root)
+    .map(chatSurfaceForComposer)
+    .filter((surface): surface is LiepinChatSurface => Boolean(surface));
+  return surfaces.length === 1 ? surfaces[0]! : null;
+}
+
+async function waitForNewChatSurface(
+  root: ParentNode,
+  existingControls: Set<HTMLElement>,
+  timeoutMs: number
+): Promise<LiepinChatSurface | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    const surface = findNewChatSurface(root, existingControls);
+    if (surface || hasAmbiguousResumePicker(root)) return surface;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return null;
+}
+
+function outboundGreetingVerified(root: ParentNode, draftText: string): boolean {
+  const expected = normalizeMessageText(draftText);
+  const selectors = [
+    ".message-self",
+    ".message-mine",
+    ".chat-message-self",
+    ".chat-message-right",
+    '[class*="message"][class*="self"]',
+    '[class*="message"][class*="mine"]',
+    '[class*="message"][class*="right"]'
+  ];
+  const matchedKnownBubble = selectors.some((selector) =>
+    [...root.querySelectorAll<HTMLElement>(selector)]
+      .some((element) => {
+        if (normalizeMessageText(element.innerText || element.textContent || "") === expected) return true;
+        return [...element.querySelectorAll<HTMLElement>("*")]
+          .filter((child) => child.children.length === 0)
+          .some((child) => normalizeMessageText(child.innerText || child.textContent || "") === expected);
+      })
+  );
+  if (matchedKnownBubble) return true;
+  return [...root.querySelectorAll<HTMLElement>("*")]
+    .filter((element) => element.children.length === 0)
+    .filter(isVisibleElement)
+    .filter((element) => !element.matches('textarea,input,[contenteditable="true"]'))
+    .some((element) => normalizeMessageText(element.innerText || element.textContent || "") === expected);
+}
+
+async function waitForObservation(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
+export async function executeLiepinReviewedSend(
+  root: ParentNode = document,
+  href = location.href,
+  platformJobId: string,
+  draftText: string,
+  needsApplication = true,
+  needsGreeting = true
+): Promise<LiepinReviewedSendResult> {
+  if (!needsApplication && !needsGreeting) {
+    return {
+      ok: true,
+      application: "verified",
+      greeting: "verified",
+      evidenceCodes: ["no_missing_component"]
+    };
+  }
+  const preflight = preflightLiepinReviewedSend(root, href, platformJobId);
+  if (!preflight.ok) {
+    return {
+      ok: false,
+      application: "failed",
+      greeting: "failed",
+      evidenceCodes: [preflight.blocker || "preflight_failed"],
+      reason: preflight.reason || "发送前检查失败"
+    };
+  }
+  const applicationEvidenceBefore = applicationEvidenceTexts(root);
+  let applicationConfirmation = findApplicationConfirmation(root);
+  let surface = findExistingChatSurface(root);
+  let reusedChatSurface = Boolean(surface);
+  if (!surface && applicationConfirmation?.status !== "ready") {
+    const action = selectAction(root, platformJobId);
+    if (!action.ok) {
+      return {
+        ok: false,
+        application: "failed",
+        greeting: "failed",
+        evidenceCodes: [action.blocker],
+        reason: action.reason
+      };
+    }
+    const existingControls = new Set(visibleTextControls(root));
+    dispatchAllowedClick(action.element);
+    surface = await waitForNewChatSurface(root, existingControls, 4000);
+    reusedChatSurface = false;
+  }
+  let application: LiepinReviewedSendResult["application"] = !needsApplication
+    ? "verified"
+    : applicationVerified(root, platformJobId, surface?.root)
+    ? "verified"
+    : "attempted";
+  if (needsApplication && application !== "verified" && surface) {
+    const resumeControl = findResumeControl(surface.root);
+    if (resumeControl) {
+      dispatchAllowedClick(resumeControl);
+      await waitForObservation(
+        () => applicationVerified(root, platformJobId, surface.root)
+          || newApplicationEvidence(root, applicationEvidenceBefore)
+          || Boolean(findApplicationConfirmation(root)),
+        2500
+      );
+      applicationConfirmation = findApplicationConfirmation(root);
+    }
+  }
+  if (needsApplication && application !== "verified" && applicationConfirmation?.status === "ready") {
+    dispatchAllowedClick(applicationConfirmation.control);
+    await waitForObservation(
+      () => applicationVerified(root, platformJobId, surface?.root) || newApplicationEvidence(root, applicationEvidenceBefore),
+      4000
+    );
+  }
+  application = !needsApplication
+    ? "verified"
+    : applicationVerified(root, platformJobId, surface?.root) || newApplicationEvidence(root, applicationEvidenceBefore)
+    ? "verified"
+    : "attempted";
+  if (hasAmbiguousResumePicker(root)) {
+    return {
+      ok: false,
+      application,
+      greeting: "failed",
+      evidenceCodes: [application === "verified" ? "application_status_verified" : "native_action_attempted", "ambiguous_resume"],
+      reason: "猎聘默认简历选择不明确"
+    };
+  }
+  if (!needsGreeting) {
+    return {
+      ok: application === "verified",
+      application,
+      greeting: "verified",
+      evidenceCodes: [
+        application === "verified" ? "application_status_verified" : "native_action_attempted",
+        "greeting_already_verified",
+        reusedChatSurface ? "chat_surface_reused" : "chat_surface_opened"
+      ]
+    };
+  }
+  if (!surface) {
+    return {
+      ok: false,
+      application,
+      greeting: "failed",
+      evidenceCodes: [application === "verified" ? "application_status_verified" : "native_action_attempted", "composer_missing"],
+      reason: "聊一聊后未找到可填写的消息框"
+    };
+  }
+  setTextControlValue(surface.composer, draftText);
+  const sendEnabled = await waitForObservation(() => !isDisabledElement(surface!.send), 2000);
+  if (!sendEnabled) {
+    return {
+      ok: false,
+      application,
+      greeting: "failed",
+      evidenceCodes: [application === "verified" ? "application_status_verified" : "native_action_attempted", "send_control_disabled"],
+      reason: "填写招呼语后发送按钮仍不可用"
+    };
+  }
+  dispatchAllowedClick(surface.send);
+  const greeting = await waitForObservation(() => outboundGreetingVerified(surface.root, draftText), 4000)
+    ? "verified"
+    : "attempted";
+  return {
+    ok: application === "verified" && greeting === "verified",
+    application,
+    greeting,
+    evidenceCodes: [
+      application === "verified" ? "application_status_verified" : "native_action_attempted",
+      greeting === "verified" ? "outbound_greeting_exact_match" : "outbound_greeting_unverified",
+      reusedChatSurface ? "chat_surface_reused" : "chat_surface_opened"
+    ]
+  };
+}
+
 function jobIdFromUrl(url: string): string {
   return url.match(/\/(?:job|a)\/(\d+)\.shtml/i)?.[1] || "";
 }

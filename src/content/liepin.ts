@@ -1,9 +1,30 @@
 import { BriefcaseBusiness, createElement } from "lucide";
-import { detectLiepinBlockedPage, extractLiepinDetail, isLiepinDetailPage, isLiepinListPage, scanLiepinList } from "../platforms/liepin";
+import {
+  detectLiepinBlockedPage,
+  executeLiepinReviewedSend,
+  extractLiepinDetail,
+  isLiepinDetailPage,
+  isLiepinListPage,
+  preflightLiepinReviewedSend,
+  scanLiepinList
+} from "../platforms/liepin";
+import {
+  liepinReviewedSendExecuteCommandSchema,
+  liepinReviewedSendPreflightCommandSchema
+} from "../domain/messages";
 
 interface CommandResponse {
   ok: boolean;
   error?: string;
+}
+
+const REVIEWED_SEND_PREFLIGHT_TTL_MS = 5 * 60 * 1000;
+const reviewedSendPreflights = new Map<string, { platformJobId: string; preparedAt: number }>();
+
+async function sha256Text(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function mountLauncher(): void {
@@ -39,14 +60,89 @@ function mountLauncher(): void {
 }
 
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
-  if (!message || typeof message !== "object" || (message as { type?: unknown }).type !== "CONTENT_SCAN") {
+  if (!message || typeof message !== "object") return false;
+  const type = (message as { type?: unknown }).type;
+  if (type === "CONTENT_SCAN") {
+    if (!isLiepinListPage()) {
+      sendResponse({ sourceUrl: location.href, candidates: [] });
+      return false;
+    }
+    sendResponse({ sourceUrl: location.href, candidates: scanLiepinList() });
     return false;
   }
-  if (!isLiepinListPage()) {
-    sendResponse({ sourceUrl: location.href, candidates: [] });
+  if (type === "CONTENT_REVIEWED_SEND_PREFLIGHT") {
+    try {
+      const command = liepinReviewedSendPreflightCommandSchema.parse(message);
+      const result = preflightLiepinReviewedSend(document, location.href, command.platformJobId);
+      if (result.ok) {
+        reviewedSendPreflights.set(command.leaseId, {
+          platformJobId: command.platformJobId,
+          preparedAt: Date.now()
+        });
+      } else {
+        reviewedSendPreflights.delete(command.leaseId);
+      }
+      sendResponse(result);
+    } catch (error) {
+      sendResponse({
+        ok: false,
+        platformJobId: "",
+        resumeMode: "platform_default",
+        blocker: "missing_action",
+        reason: error instanceof Error ? "发送前检查命令无效" : "发送前检查失败"
+      });
+    }
     return false;
   }
-  sendResponse({ sourceUrl: location.href, candidates: scanLiepinList() });
+  if (type === "CONTENT_REVIEWED_SEND_EXECUTE") {
+    void (async () => {
+      try {
+        const command = liepinReviewedSendExecuteCommandSchema.parse(message);
+        const preflight = reviewedSendPreflights.get(command.leaseId);
+        if (!preflight
+          || preflight.platformJobId !== command.platformJobId
+          || Date.now() - preflight.preparedAt > REVIEWED_SEND_PREFLIGHT_TTL_MS) {
+          sendResponse({
+            ok: false,
+            application: "failed",
+            greeting: "failed",
+            evidenceCodes: ["preflight_lease_invalid"],
+            reason: "发送前检查不存在或已过期"
+          });
+          return;
+        }
+        if (await sha256Text(command.draftText) !== command.draftSha256) {
+          reviewedSendPreflights.delete(command.leaseId);
+          sendResponse({
+            ok: false,
+            application: "failed",
+            greeting: "failed",
+            evidenceCodes: ["draft_hash_mismatch"],
+            reason: "待发送草稿与已确认版本不一致"
+          });
+          return;
+        }
+        reviewedSendPreflights.delete(command.leaseId);
+        sendResponse(await executeLiepinReviewedSend(
+          document,
+          location.href,
+          command.platformJobId,
+          command.draftText,
+          command.needsApplication,
+          command.needsGreeting
+        ));
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          application: "failed",
+          greeting: "failed",
+          evidenceCodes: ["content_command_failed"],
+          reason: error instanceof Error ? error.message : "发送命令失败"
+        });
+      }
+    })();
+    return true;
+  }
   return false;
 });
 

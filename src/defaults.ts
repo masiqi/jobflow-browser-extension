@@ -43,6 +43,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
     rememberKey: false
   },
   maxJobsPerBatch: 10,
+  dailySendLimit: 150,
   detailTimeoutSeconds: 90,
   launcherVisible: true
 };

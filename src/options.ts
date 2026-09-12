@@ -4,8 +4,14 @@ import { readPastedResume, readResumeFile } from "./pdf";
 import { sourceHash } from "./resume";
 import { deleteResume, storeResumeFile, storeResumeText } from "./local/resume-store";
 import { escapeHtml, formatTime, sendCommand } from "./ui/command";
+import {
+  DELIVERY_COMPONENT_LABELS,
+  DELIVERY_OVERALL_LABELS,
+  recordStatusLabel
+} from "./ui/delivery";
 import type {
   AppState,
+  DeliveryRecord,
   ExtensionSettings,
   OpportunityRecord,
   ResumeProfile
@@ -21,6 +27,11 @@ type StoredRetryFeedback = {
   kind: "idle" | "progress" | "success" | "error";
   message: string;
 };
+type ReviewedSendFeedback = {
+  opportunityId: string;
+  kind: "idle" | "progress" | "ready" | "success" | "error";
+  message: string;
+};
 
 const appElement = document.querySelector<HTMLDivElement>("#app");
 if (!appElement) throw new Error("管理台根节点不存在");
@@ -34,6 +45,9 @@ let resumeImportBusy = false;
 let resumeImportFeedback: ResumeImportFeedback = { kind: "idle", message: "" };
 let storedRetryBusyOpportunityId = "";
 let storedRetryFeedback: StoredRetryFeedback = { opportunityId: "", kind: "idle", message: "" };
+let reviewedSendBusyOpportunityId = "";
+let reviewedSendPreparedOpportunityId = "";
+let reviewedSendFeedback: ReviewedSendFeedback = { opportunityId: "", kind: "idle", message: "" };
 
 const STATUS_LABELS: Record<string, string> = {
   discovered: "待处理",
@@ -81,6 +95,8 @@ function accountView(state: AppState): string {
     '<dt>模型权益</dt><dd>' + (state.auth.vip ? "VIP 托管模型" : "BYOK") + '</dd></dl>',
     '<label class="check"><input id="launcherVisible" type="checkbox" ' + (state.settings.launcherVisible ? "checked" : "")
       + '><span>在猎聘页面显示侧边栏入口</span></label>',
+    '<label class="daily-limit">猎聘每日投递上限<input id="dailySendLimit" type="number" min="1" max="500" step="1" value="'
+      + String(state.settings.dailySendLimit) + '"></label>',
     '<div class="actions"><button data-action="save-interface">保存界面设置</button><button data-action="logout">退出登录</button>',
     '<button class="danger-quiet" data-action="delete-my-data">删除我的求职数据</button></div>'
   ].join("");
@@ -224,18 +240,22 @@ function recordView(state: AppState): string {
     ).join(""),
     '</select><input id="recordSearch" type="search" value="' + escapeHtml(recordSearch) + '" placeholder="搜索职位或公司"></div>',
     '<div class="record-layout"><div class="record-table">',
-    records.map((record) => recordRow(record, selected?.id === record.id)).join("")
+    records.map((record) => recordRow(
+      record,
+      selected?.id === record.id,
+      state.deliveries.find((delivery) => delivery.opportunityId === record.id)
+    )).join("")
       || '<div class="empty-state">没有符合条件的职位记录。</div>',
     '</div><div class="record-detail">', selected ? recordDetail(state, selected) : '<div class="empty-state">选择一条记录查看详情。</div>',
     '</div></div>'
   ].join("");
 }
 
-function recordRow(record: OpportunityRecord, selected: boolean): string {
+function recordRow(record: OpportunityRecord, selected: boolean, delivery?: DeliveryRecord): string {
   return '<button type="button" class="record-row ' + (selected ? "selected" : "") + '" data-record-id="'
-    + escapeHtml(record.id) + '"><span class="status-dot ' + escapeHtml(record.status)
+    + escapeHtml(record.id) + '"><span class="status-dot ' + escapeHtml(delivery?.overallStatus ?? record.status)
     + '"></span><span><b>' + escapeHtml(record.title) + '</b><small>' + escapeHtml(record.company)
-    + " · " + escapeHtml(STATUS_LABELS[record.status] || record.status) + '</small></span><time>'
+    + " · " + escapeHtml(recordStatusLabel(record, delivery)) + '</small></span><time>'
     + escapeHtml(formatTime(record.lastSeenAt)) + "</time></button>";
 }
 
@@ -248,10 +268,21 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
   const events = state.events.filter((event) => event.opportunityId === record.id).slice().reverse();
   const ruleEvidence = projectRuleEvidence(events);
   const draft = state.drafts.find((item) => item.opportunityId === record.id);
+  const delivery = state.deliveries.find((item) => item.opportunityId === record.id);
   const canOverride = ["deterministic_excluded", "model_excluded", "user_excluded"].includes(record.status);
   const canRetryStored = record.status === "failed" && Boolean(record.description?.trim());
+  const latestRevision = draft?.revisions
+    .filter((revision) => revision.text === draft.currentText)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+  const retryableDeliveryStatuses = new Set(["ready", "awaiting_confirmation", "partial", "failed", "review_required"]);
+  const canPrepareReviewedSend = record.status === "draft_ready"
+    && Boolean(draft && latestRevision)
+    && (!delivery || retryableDeliveryStatuses.has(delivery.overallStatus));
   const retryBusy = Boolean(storedRetryBusyOpportunityId);
   const retryFeedback = storedRetryFeedback.opportunityId === record.id ? storedRetryFeedback : null;
+  const reviewedBusy = reviewedSendBusyOpportunityId === record.id;
+  const reviewedPrepared = reviewedSendPreparedOpportunityId === record.id;
+  const reviewedFeedback = reviewedSendFeedback.opportunityId === record.id ? reviewedSendFeedback : null;
   return [
     '<div class="detail-heading"><div><span class="badge ' + escapeHtml(record.status) + '">'
       + escapeHtml(STATUS_LABELS[record.status] || record.status) + '</span><h3>' + escapeHtml(record.title)
@@ -296,6 +327,28 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
         '<div class="revision"><b>' + (revision.kind === "generated" ? "模型生成" : "用户编辑")
         + '</b><time>' + escapeHtml(formatTime(revision.createdAt)) + '</time><p>' + escapeHtml(revision.text) + "</p></div>"
       ).join("") + "</details></div>" : "",
+    delivery || canPrepareReviewedSend || reviewedFeedback
+      ? '<div class="detail-section reviewed-send" aria-busy="' + String(reviewedBusy) + '"><h4>人工确认投递并打招呼</h4>'
+        + '<dl class="delivery-details"><dt>简历</dt><dd>使用猎聘当前默认简历</dd><dt>投递</dt><dd>'
+        + escapeHtml(DELIVERY_COMPONENT_LABELS[delivery?.applicationStatus ?? "pending"] ?? "未知") + '</dd><dt>招呼</dt><dd>'
+        + escapeHtml(DELIVERY_COMPONENT_LABELS[delivery?.greetingStatus ?? "pending"] ?? "未知") + '</dd><dt>整体</dt><dd>'
+        + escapeHtml(DELIVERY_OVERALL_LABELS[delivery?.overallStatus ?? "ready"] ?? "未知") + '</dd></dl>'
+        + (delivery?.latestReason ? '<p class="reviewed-send-status">' + escapeHtml(delivery.latestReason) + "</p>" : "")
+        + '<p class="write-warning">确认后会对招聘网站执行真实写操作。请先打开对应猎聘职位详情页并确认账号状态。</p>'
+        + '<div class="actions">'
+        + (canPrepareReviewedSend && !reviewedPrepared
+          ? '<button class="primary" data-action="prepare-reviewed-send" data-id="' + escapeHtml(record.id)
+            + '" data-revision-id="' + escapeHtml(latestRevision?.id ?? "") + '" '
+            + (reviewedBusy ? "disabled" : "") + '>' + (reviewedBusy ? "检查中" : "准备发送") + '</button>'
+          : "")
+        + (reviewedPrepared
+          ? '<button class="danger-quiet" data-action="confirm-reviewed-send" data-id="' + escapeHtml(record.id)
+            + '" data-revision-id="' + escapeHtml(latestRevision?.id ?? "") + '" '
+            + (reviewedBusy ? "disabled" : "") + '>确认真实投递并发送</button>'
+          : "")
+        + '</div><p id="reviewedSendStatus" class="reviewed-send-status ' + escapeHtml(reviewedFeedback?.kind ?? "idle")
+        + '" role="status" aria-live="polite" aria-atomic="true">' + escapeHtml(reviewedFeedback?.message ?? "") + "</p></div>"
+      : "",
     record.status === "review_required"
       ? '<div class="actions"><button class="primary" data-action="review-continue" data-id="' + escapeHtml(record.id)
         + '">继续生成</button><button data-action="review-exclude" data-id="' + escapeHtml(record.id)
@@ -332,7 +385,7 @@ async function render(): Promise<void> {
   }
   app.innerHTML = [
     '<aside><div class="brand"><span>JF</span><div><b>JobFlow</b><small>猎聘草稿助手</small></div></div>',
-    '<nav>', navMarkup(), '</nav><div class="mode"><span></span><div><b>仅生成草稿</b><small>无平台写操作</small></div></div></aside>',
+    '<nav>', navMarkup(), '</nav><div class="mode"><span></span><div><b>逐条确认发送</b><small>仅管理台可执行真实写入</small></div></div></aside>',
     '<main><header><div><b>' + escapeHtml(state.auth.email || "未登录") + '</b><small>'
       + (state.auth.vip ? "VIP · " : "") + escapeHtml(state.settings.model.route.toUpperCase()) + " · "
       + escapeHtml(state.settings.model.provider) + " / " + escapeHtml(state.settings.model.model)
@@ -411,6 +464,15 @@ function collectModel(settings: ExtensionSettings): ExtensionSettings {
   };
 }
 
+function collectInterface(settings: ExtensionSettings): ExtensionSettings {
+  const rawLimit = Number(document.querySelector<HTMLInputElement>("#dailySendLimit")?.value || settings.dailySendLimit);
+  return {
+    ...settings,
+    launcherVisible: checked("launcherVisible"),
+    dailySendLimit: Number.isInteger(rawLimit) && rawLimit >= 1 && rawLimit <= 500 ? rawLimit : settings.dailySendLimit
+  };
+}
+
 function bindActions(state: AppState): void {
   document.querySelectorAll<HTMLElement>("[data-view]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -472,6 +534,10 @@ async function handleAction(action: string, target: HTMLElement, state: AppState
     await runStoredOpportunityRetry(target.dataset.id || "");
     return;
   }
+  if (action === "prepare-reviewed-send" || action === "confirm-reviewed-send") {
+    await runReviewedSend(action === "confirm-reviewed-send", target.dataset.id || "", target.dataset.revisionId || "", state);
+    return;
+  }
   try {
     if (action === "login" || action === "register") {
       await sendCommand({
@@ -484,7 +550,7 @@ async function handleAction(action: string, target: HTMLElement, state: AppState
     } else if (action === "save-interface") {
       await sendCommand({
         type: "UPDATE_SETTINGS",
-        settings: { ...state.settings, launcherVisible: checked("launcherVisible") }
+        settings: collectInterface(state.settings)
       });
     } else if (action === "delete-my-data") {
       if (confirm("永久删除云端画像、规则、职位、草稿和当前设备简历原件？此操作无法恢复。")) {
@@ -579,6 +645,55 @@ async function runStoredOpportunityRetry(opportunityId: string): Promise<void> {
       message: error instanceof Error ? error.message : String(error)
     };
     storedRetryBusyOpportunityId = "";
+    await render();
+  }
+}
+
+function updateReviewedSendFeedback(feedback: ReviewedSendFeedback, busy: boolean): void {
+  reviewedSendFeedback = feedback;
+  reviewedSendBusyOpportunityId = busy ? feedback.opportunityId : "";
+  const panel = document.querySelector<HTMLElement>(".reviewed-send");
+  const status = document.querySelector<HTMLElement>("#reviewedSendStatus");
+  panel?.setAttribute("aria-busy", String(busy));
+  if (status) {
+    status.textContent = feedback.message;
+    status.className = "reviewed-send-status " + feedback.kind;
+  }
+}
+
+async function runReviewedSend(confirmSend: boolean, opportunityId: string, draftRevisionId: string, state: AppState): Promise<void> {
+  if (!opportunityId || !draftRevisionId || reviewedSendBusyOpportunityId) return;
+  const draft = state.drafts.find((item) => item.opportunityId === opportunityId);
+  if (!draft) throw new Error("草稿不存在");
+  const draftSha256 = await sourceHash(draft.currentText);
+  updateReviewedSendFeedback({
+    opportunityId,
+    kind: "progress",
+    message: confirmSend ? "正在预留今日额度并执行一次真实发送" : "正在检查猎聘职位详情页和默认简历状态"
+  }, true);
+  try {
+    await sendCommand({
+      type: confirmSend ? "CONFIRM_REVIEWED_SEND" : "PREPARE_REVIEWED_SEND",
+      opportunityId,
+      draftRevisionId,
+      draftSha256
+    });
+    reviewedSendPreparedOpportunityId = confirmSend ? "" : opportunityId;
+    reviewedSendFeedback = {
+      opportunityId,
+      kind: confirmSend ? "success" : "ready",
+      message: confirmSend ? "已执行一次真实发送流程，请查看投递组件状态" : "发送前检查通过，请确认是否真实投递并发送"
+    };
+    reviewedSendBusyOpportunityId = "";
+    await render();
+  } catch (error) {
+    reviewedSendFeedback = {
+      opportunityId,
+      kind: "error",
+      message: error instanceof Error ? error.message : String(error)
+    };
+    reviewedSendBusyOpportunityId = "";
+    reviewedSendPreparedOpportunityId = "";
     await render();
   }
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
 import { DEFAULT_SETTINGS } from "../src/defaults";
-import { decodeRuntimeRequest, extensionSettingsSchema } from "../src/domain/messages";
+import { decodeRuntimeRequest, extensionSettingsSchema, liepinReviewedSendExecuteCommandSchema } from "../src/domain/messages";
 import { normalizeChatCompletionsEndpoint } from "../src/llm";
 
 describe("runtime and endpoint contracts", () => {
@@ -58,6 +58,61 @@ describe("runtime and endpoint contracts", () => {
       opportunityId,
       description: "不能由页面提供 JD"
     })).toThrow();
+  });
+
+  it("accepts only strict reviewed-send identities without page-supplied content", () => {
+    const command = {
+      type: "PREPARE_REVIEWED_SEND",
+      opportunityId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      draftRevisionId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      draftSha256: "a".repeat(64)
+    };
+    expect(decodeRuntimeRequest(command)).toEqual(command);
+    expect(decodeRuntimeRequest({ ...command, type: "CONFIRM_REVIEWED_SEND" }).type).toBe("CONFIRM_REVIEWED_SEND");
+    expect(() => decodeRuntimeRequest({ ...command, opportunityId: "not-a-uuid" })).toThrow();
+    expect(() => decodeRuntimeRequest({ ...command, draftText: "不能由页面提供话术" })).toThrow();
+    expect(() => decodeRuntimeRequest({ ...command, platformJobId: "1980000301" })).toThrow();
+  });
+
+  it("requires reviewed-send execute leases to declare missing components", () => {
+    expect(liepinReviewedSendExecuteCommandSchema.parse({
+      type: "CONTENT_REVIEWED_SEND_EXECUTE",
+      leaseId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      platformJobId: "1980000301",
+      draftText: "合成招呼语",
+      draftSha256: "a".repeat(64),
+      needsApplication: true,
+      needsGreeting: false
+    }).needsGreeting).toBe(false);
+    expect(() => liepinReviewedSendExecuteCommandSchema.parse({
+      type: "CONTENT_REVIEWED_SEND_EXECUTE",
+      leaseId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      platformJobId: "1980000301",
+      draftText: "合成招呼语",
+      draftSha256: "a".repeat(64)
+    })).toThrow();
+  });
+
+  it("rechecks preflight and records both attempts before the reviewed platform command", async () => {
+    const source = await readFile("src/background.ts", "utf8");
+    const handler = source.slice(
+      source.indexOf("async function confirmReviewedSend"),
+      source.indexOf("async function handleReviewDecision")
+    );
+    const finalPreflight = handler.indexOf('type: "CONTENT_REVIEWED_SEND_PREFLIGHT"');
+    const reserve = handler.indexOf("reserveReviewedDeliveryQuota(");
+    const markWrite = handler.indexOf("markReviewedDeliveryWriteStarted(");
+    const applicationAttempt = handler.indexOf('eventKind: "application_attempted"');
+    const greetingAttempt = handler.indexOf('eventKind: "greeting_attempted"');
+    const execute = handler.indexOf('type: "CONTENT_REVIEWED_SEND_EXECUTE"');
+    expect(finalPreflight).toBeGreaterThan(0);
+    expect(finalPreflight).toBeLessThan(reserve);
+    expect(reserve).toBeLessThan(markWrite);
+    expect(markWrite).toBeLessThan(applicationAttempt);
+    expect(applicationAttempt).toBeLessThan(execute);
+    expect(greetingAttempt).toBeLessThan(execute);
+    expect(handler).toContain("releaseReviewedDeliveryQuota(");
+    expect(handler).toContain("reviewedSendLeases.delete(opportunityId)");
   });
 
   it("rejects legacy free-form settings", () => {

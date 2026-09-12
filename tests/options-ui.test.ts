@@ -63,7 +63,8 @@ function appState(resumeProfile: ResumeProfile | null = null): AppState {
     opportunities: [],
     evaluations: [],
     events: [],
-    drafts: []
+    drafts: [],
+    deliveries: []
   };
 }
 
@@ -306,5 +307,138 @@ describe("resume profile interactions", () => {
     expect(document.querySelector("#storedRetryStatus")?.classList.contains("error")).toBe(true);
     expect((document.querySelector('[data-action="retry-stored-opportunity"]') as HTMLButtonElement).disabled).toBe(false);
     expect(chrome.tabs.create).not.toHaveBeenCalled();
+  });
+
+  it("requires prepare before a reviewed live send confirmation and blocks duplicates", async () => {
+    const state = appState(profile());
+    const opportunityId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const revisionId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    state.opportunities = [{
+      id: opportunityId,
+      userId: state.auth.userId!,
+      platform: "liepin",
+      platformJobId: "1980000304",
+      canonicalUrl: "https://www.liepin.com/a/1980000304.shtml",
+      title: "合成 Agent 工程师",
+      company: "合成科技",
+      location: "北京",
+      salary: "30-50k",
+      experience: "3-5年",
+      education: "本科",
+      cardText: "合成职位卡片",
+      description: "岗位职责：负责合成智能体平台研发。",
+      status: "draft_ready",
+      firstSeenAt: "2026-09-11T00:00:00.000Z",
+      lastSeenAt: "2026-09-11T00:00:01.000Z"
+    }];
+    state.drafts = [{
+      opportunityId,
+      currentText: "您好，我关注到这个合成 Agent 岗位，过往做过任务平台和稳定性建设，想进一步沟通匹配度。",
+      revisions: [{
+        id: revisionId,
+        kind: "generated",
+        text: "您好，我关注到这个合成 Agent 岗位，过往做过任务平台和稳定性建设，想进一步沟通匹配度。",
+        createdAt: "2026-09-11T00:00:02.000Z",
+        jdEvidence: ["负责合成智能体平台研发"],
+        factIds: ["fact-1"]
+      }],
+      updatedAt: "2026-09-11T00:00:02.000Z"
+    }];
+    let releasePrepare!: () => void;
+    const pendingPrepare = new Promise<void>((resolve) => {
+      releasePrepare = resolve;
+    });
+    const sendMessage = vi.fn(async (request: { type: string }) => {
+      if (request.type === "GET_APP_STATE") return { ok: true, data: state };
+      if (request.type === "PREPARE_REVIEWED_SEND") {
+        await pendingPrepare;
+        return { ok: true, data: {} };
+      }
+      if (request.type === "CONFIRM_REVIEWED_SEND") return { ok: true, data: {} };
+      return { ok: true };
+    });
+    vi.stubGlobal("chrome", { runtime: { sendMessage }, tabs: { create: vi.fn() } });
+
+    await import("../src/options");
+    await vi.waitFor(() => expect(document.querySelector('[data-action="prepare-reviewed-send"]')).not.toBeNull());
+    expect(document.querySelector('[data-action="confirm-reviewed-send"]')).toBeNull();
+    const prepare = document.querySelector('[data-action="prepare-reviewed-send"]') as HTMLButtonElement;
+    prepare.click();
+    await vi.waitFor(() => expect(document.querySelector("#reviewedSendStatus")?.textContent).toContain("正在检查"));
+    prepare.click();
+    expect(sendMessage.mock.calls.filter(([request]) => request.type === "PREPARE_REVIEWED_SEND")).toHaveLength(1);
+
+    releasePrepare();
+    await vi.waitFor(() => expect(document.querySelector('[data-action="confirm-reviewed-send"]')).not.toBeNull());
+    expect(document.querySelector('[data-action="prepare-reviewed-send"]')).toBeNull();
+    (document.querySelector('[data-action="confirm-reviewed-send"]') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(sendMessage.mock.calls.some(([request]) => request.type === "CONFIRM_REVIEWED_SEND")).toBe(true));
+    const confirmRequest = sendMessage.mock.calls.find(([request]) => request.type === "CONFIRM_REVIEWED_SEND")?.[0] as
+      | { opportunityId: string; draftRevisionId: string; draftSha256: string }
+      | undefined;
+    expect(confirmRequest).toBeDefined();
+    expect(confirmRequest).toMatchObject({ opportunityId, draftRevisionId: revisionId });
+    expect(confirmRequest!.draftSha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("renders durable verified delivery labels and no replay action after completion", async () => {
+    const state = appState(profile());
+    const opportunityId = "abababab-abab-4bab-8bab-abababababab";
+    const revisionId = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd";
+    const draftText = "您好，这是一条已经完成真实投递并通过平台回读验证的合成招呼语。";
+    state.opportunities = [{
+      id: opportunityId,
+      userId: state.auth.userId!,
+      platform: "liepin",
+      platformJobId: "1980000305",
+      canonicalUrl: "https://www.liepin.com/a/1980000305.shtml",
+      title: "合成交付工程师",
+      company: "合成科技",
+      location: "北京",
+      salary: "30-50k",
+      experience: "3-5年",
+      education: "本科",
+      cardText: "合成职位卡片",
+      description: "负责合成交付平台研发。",
+      status: "draft_ready",
+      firstSeenAt: "2026-09-11T00:00:00.000Z",
+      lastSeenAt: "2026-09-11T00:00:01.000Z"
+    }];
+    state.drafts = [{
+      opportunityId,
+      currentText: draftText,
+      revisions: [{
+        id: revisionId,
+        kind: "generated",
+        text: draftText,
+        createdAt: "2026-09-11T00:00:02.000Z",
+        jdEvidence: ["合成交付平台"],
+        factIds: ["fact-1"]
+      }],
+      updatedAt: "2026-09-11T00:00:02.000Z"
+    }];
+    state.deliveries = [{
+      opportunityId,
+      platform: "liepin",
+      platformJobId: "1980000305",
+      resumeMode: "platform_default",
+      overallStatus: "succeeded",
+      applicationStatus: "verified",
+      greetingStatus: "verified",
+      draftRevisionId: revisionId,
+      draftSha256: "a".repeat(64),
+      latestReason: "正式投递已从猎聘页面验证",
+      updatedAt: "2026-09-11T00:00:03.000Z"
+    }];
+    const sendMessage = vi.fn(async () => ({ ok: true, data: state }));
+    vi.stubGlobal("chrome", { runtime: { sendMessage }, tabs: { create: vi.fn() } });
+
+    await import("../src/options");
+    await vi.waitFor(() => expect(document.querySelector(".reviewed-send")?.textContent).toContain("已完成"));
+    expect(document.querySelector(".reviewed-send")?.textContent).toContain("正式投递已从猎聘页面验证");
+    expect(document.querySelectorAll(".delivery-details dd")[1]?.textContent).toBe("已验证");
+    expect(document.querySelectorAll(".delivery-details dd")[2]?.textContent).toBe("已验证");
+    expect(document.querySelector('[data-action="prepare-reviewed-send"]')).toBeNull();
+    expect(document.querySelector('[data-action="confirm-reviewed-send"]')).toBeNull();
   });
 });

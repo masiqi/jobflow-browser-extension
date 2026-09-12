@@ -6,9 +6,12 @@ import {
   getRun,
   getScanPreview,
   loadSettings,
+  saveRun,
+  saveScanPreview,
   saveSettings,
   setByokKey
 } from "../src/storage";
+import type { BatchRun, ScanPreview } from "../src/types";
 
 function storageArea(values: Map<string, unknown>) {
   return {
@@ -67,5 +70,83 @@ describe("device-owned extension storage", () => {
     local.set(STORAGE_KEYS.scanPreview, { sourceUrl: "not-a-url", candidates: [] });
     expect(await getRun()).toBeNull();
     expect(await getScanPreview()).toBeNull();
+  });
+
+  it("rejects an invalid batch run before overwriting storage", async () => {
+    const existing = { id: "existing-run" };
+    local.set(STORAGE_KEYS.run, existing);
+    const invalidRun = {
+      id: "11111111-1111-4111-8111-111111111111",
+      platform: "liepin",
+      status: "running",
+      sourceUrl: "https://www.liepin.com/zhaopin/",
+      createdAt: "2026-09-12T00:00:00.000Z",
+      updatedAt: "2026-09-12T00:00:00.000Z",
+      currentIndex: 0,
+      items: [{
+        candidate: {
+          platform: "liepin",
+          jobId: "1980000501",
+          url: "https://www.liepin.com/job/1980000501.shtml",
+          canonicalUrl: "https://www.liepin.com/job/1980000501.shtml",
+          title: "合成职位",
+          company: "合成公司",
+          location: "北京",
+          salary: "20-30k",
+          experience: "3年",
+          education: "本科",
+          cardText: "合成职位卡片",
+          index: 0,
+          description: "不应写入批次候选项的详情字段"
+        },
+        status: "queued",
+        attempt: 0
+      }],
+      draftCount: 0,
+      excludedCount: 0,
+      reviewCount: 0,
+      failedCount: 0
+    } as unknown as BatchRun;
+
+    await expect(saveRun(invalidRun)).rejects.toThrow();
+    expect(local.get(STORAGE_KEYS.run)).toBe(existing);
+  });
+
+  it("rejects an invalid scan preview before overwriting storage", async () => {
+    const existing = { sourceUrl: "existing-preview" };
+    local.set(STORAGE_KEYS.scanPreview, existing);
+
+    await expect(saveScanPreview({
+      sourceUrl: "https://www.liepin.com/zhaopin/",
+      candidates: [],
+      observedCount: 0,
+      newCount: 0,
+      duplicateCount: 0,
+      excludedCount: 0,
+      draftedCount: 0,
+      processableJobIds: [],
+      selectedJobIds: [],
+      detailOnlyField: "not allowed"
+    } as unknown as ScanPreview)).rejects.toThrow();
+    expect(local.get(STORAGE_KEYS.scanPreview)).toBe(existing);
+  });
+
+  it("merges new default settings into legacy persisted settings without clearing model test state", async () => {
+    const legacySettings = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+    delete legacySettings.dailySendLimit;
+    legacySettings.model = {
+      ...DEFAULT_SETTINGS.model,
+      connectionTestedAt: "2026-09-11T00:00:00.000Z",
+      testedFingerprint: "synthetic-fingerprint"
+    };
+    local.set(STORAGE_KEYS.settings, legacySettings);
+
+    expect(await loadSettings()).toMatchObject({
+      dailySendLimit: 150,
+      model: {
+        connectionTestedAt: "2026-09-11T00:00:00.000Z",
+        testedFingerprint: "synthetic-fingerprint"
+      }
+    });
   });
 });

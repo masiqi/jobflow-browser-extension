@@ -94,8 +94,8 @@ button.primary:disabled { opacity: .45; cursor: default; }
 .records { margin-top: 4px; }
 .record { min-height: 48px; display: grid; grid-template-columns: 10px minmax(0, 1fr); gap: 8px; align-items: center; border-bottom: 1px solid #e8ecf0; }
 .status { width: 7px; height: 7px; border-radius: 50%; background: #758292; }
-.status.draft_ready { background: #238657; }
-.status.review_required { background: #c48615; }
+.status.draft_ready, .status.succeeded { background: #238657; }
+.status.review_required, .status.awaiting_confirmation, .status.partial { background: #c48615; }
 .status.failed, .status.model_excluded, .status.deterministic_excluded, .status.user_excluded { background: #bd4a42; }
 .record-reason { color: #9f332d; }
 .empty { color: #788492; padding: 12px 0; line-height: 1.5; }
