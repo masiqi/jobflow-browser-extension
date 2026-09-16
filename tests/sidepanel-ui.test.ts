@@ -410,6 +410,19 @@ describe("side-panel scan interaction", () => {
     opportunity.status = "draft_ready";
     const state = appState(scanPreview);
     state.opportunities = [opportunity];
+    state.run = {
+      ...batchRun(scanPreview, [opportunity.platformJobId], "招呼语已从猎聘页面验证"),
+      status: "paused",
+      executionPolicy: "automatic_send",
+      currentIndex: 1,
+      items: [{
+        ...batchRun(scanPreview, [opportunity.platformJobId]).items[0]!,
+        status: "delivery_partial",
+        opportunityId: opportunity.id,
+        blockerPhase: "post_write",
+        blockerCode: "component_unverified"
+      }]
+    };
     state.deliveries = [{
       opportunityId: opportunity.id,
       platform: "liepin",
@@ -429,5 +442,8 @@ describe("side-panel scan interaction", () => {
       "正式投递已尝试，尚未取得独立平台证据"
     );
     expect(document.querySelector(".record-reason")?.textContent).toContain("招呼语已从猎聘页面验证");
+    expect(document.querySelector(".run-pause-reason")?.textContent).toContain(
+      "正式投递已尝试，尚未取得独立平台证据"
+    );
   });
 });

@@ -162,10 +162,18 @@ function previewMarkup(preview: ScanPreview | null, selectedJobs: Set<string>): 
   ].join("");
 }
 
-function runMarkup(run: BatchRun | null): string {
+function runMarkup(run: BatchRun | null, deliveries: DeliveryRecord[] = []): string {
   if (!run) return '<p class="empty">尚未运行批次。</p>';
   const failures = run.items.filter((item) => item.status === "failed" && item.error);
   const currentItem = run.items[run.currentIndex];
+  const partialItem = run.items
+    .slice(0, run.currentIndex)
+    .reverse()
+    .find((item) => item.status === "delivery_partial" && item.opportunityId);
+  const partialDelivery = partialItem?.opportunityId
+    ? deliveries.find((delivery) => delivery.opportunityId === partialItem.opportunityId)
+    : undefined;
+  const pauseReason = deliveryDisplayReason(partialDelivery) ?? run.pauseReason;
   const nextActionEligibleAt = run.nextNavigationEligibleAt ?? run.nextWriteEligibleAt;
   const waitSeconds = nextActionEligibleAt
     ? Math.max(0, Math.ceil((new Date(nextActionEligibleAt).getTime() - Date.now()) / 1000))
@@ -178,7 +186,7 @@ function runMarkup(run: BatchRun | null): string {
     '</p><small>草稿 ', String(run.draftCount), " · 排除 ", String(run.excludedCount),
     " · 复核 ", String(run.reviewCount), " · 失败 ", String(run.failedCount),
     " · 已投递 ", String(run.deliverySucceededCount), " · 待复核投递 ", String(run.deliveryPartialCount), "</small>",
-    run.pauseReason ? '<p class="run-pause-reason">暂停原因：' + escapeHtml(run.pauseReason) + "</p>" : "",
+    pauseReason ? '<p class="run-pause-reason">暂停原因：' + escapeHtml(pauseReason) + "</p>" : "",
     waitSeconds !== null && nextActionEligibleAt
       ? '<p class="run-wait" aria-live="polite">距离下一次'
         + (run.nextNavigationEligibleAt ? "职位详情访问" : " JobFlow 投递")
@@ -280,7 +288,7 @@ async function render(): Promise<void> {
     ' aria-busy="' + String(startBusy) + '">',
     escapeHtml(startBusy ? "正在启动" : startLabel), "</button></div></div></section>",
     '<section><div class="section-title"><h2>批次</h2><div id="run-actions"></div></div>',
-    runMarkup(run),
+    runMarkup(run, state.deliveries),
     '</section>',
     '<section><div class="section-title"><h2>最近记录</h2><button id="viewAll" class="link-button" type="button">查看全部</button></div>',
     '<div class="records">', recordsMarkup(state.opportunities, state.deliveries),
