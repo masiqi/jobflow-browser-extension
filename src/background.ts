@@ -1257,14 +1257,22 @@ function parseReviewedSendExecution(raw: unknown): ReviewedSendExecution {
 }
 
 const AUTOMATIC_APPLICATION_CLICK_ASSUMED_CODE = "application_click_assumed_success";
+const AUTOMATIC_APPLICATION_GREETING_CLICK_ASSUMED_CODE = "application_greeting_click_assumed_success";
 const AUTOMATIC_GREETING_CLICK_ASSUMED_CODE = "greeting_click_assumed_success";
 
 function assumeAutomaticClickSuccess(result: ReviewedSendExecution): ReviewedSendExecution {
-  const applicationAssumed = result.application === "attempted"
+  const applicationAssumedBySubmit = result.application === "attempted"
     && result.evidenceCodes.includes("application_submit_clicked");
+  const applicationAssumedByGreeting = result.application === "attempted"
+    && result.evidenceCodes.includes("greeting_send_clicked");
+  const applicationAssumptionCode = applicationAssumedBySubmit
+    ? AUTOMATIC_APPLICATION_CLICK_ASSUMED_CODE
+    : applicationAssumedByGreeting
+      ? AUTOMATIC_APPLICATION_GREETING_CLICK_ASSUMED_CODE
+      : undefined;
   const greetingAssumed = result.greeting === "attempted"
     && result.evidenceCodes.includes("outbound_greeting_unverified");
-  const application = applicationAssumed ? "verified" : result.application;
+  const application = applicationAssumptionCode ? "verified" : result.application;
   const greeting = greetingAssumed ? "verified" : result.greeting;
   return {
     ...result,
@@ -1273,7 +1281,7 @@ function assumeAutomaticClickSuccess(result: ReviewedSendExecution): ReviewedSen
     greeting,
     evidenceCodes: [
       ...result.evidenceCodes,
-      ...(applicationAssumed ? [AUTOMATIC_APPLICATION_CLICK_ASSUMED_CODE] : []),
+      ...(applicationAssumptionCode ? [applicationAssumptionCode] : []),
       ...(greetingAssumed ? [AUTOMATIC_GREETING_CLICK_ASSUMED_CODE] : [])
     ]
   };
@@ -1302,6 +1310,9 @@ function reviewedComponentReasonForResult(
   if (component === "application" && result.evidenceCodes.includes(AUTOMATIC_APPLICATION_CLICK_ASSUMED_CODE)) {
     return clickAssumptionReason(component);
   }
+  if (component === "application" && result.evidenceCodes.includes(AUTOMATIC_APPLICATION_GREETING_CLICK_ASSUMED_CODE)) {
+    return "已点击猎聘招呼语发送控件，按开发阶段策略将投递并联系计为已发送（未等待页面回读）";
+  }
   if (component === "greeting" && result.evidenceCodes.includes(AUTOMATIC_GREETING_CLICK_ASSUMED_CODE)) {
     return clickAssumptionReason(component);
   }
@@ -1318,17 +1329,20 @@ function reviewedComponentEvidenceCode(
   component: "application" | "greeting",
   result: ReviewedSendExecution
 ): string {
-  const assumedCode = component === "application"
-    ? AUTOMATIC_APPLICATION_CLICK_ASSUMED_CODE
-    : AUTOMATIC_GREETING_CLICK_ASSUMED_CODE;
-  if (result.evidenceCodes.includes(assumedCode)) return assumedCode;
+  const assumedCodes = component === "application"
+    ? [AUTOMATIC_APPLICATION_CLICK_ASSUMED_CODE, AUTOMATIC_APPLICATION_GREETING_CLICK_ASSUMED_CODE]
+    : [AUTOMATIC_GREETING_CLICK_ASSUMED_CODE];
+  const assumedCode = assumedCodes.find((code) => result.evidenceCodes.includes(code));
+  if (assumedCode) return assumedCode;
   if (component === "application") return result.evidenceCodes[0] || "application_observed";
   return result.evidenceCodes.find((code) => code.includes("greeting") || code.includes("composer") || code.includes("send_"))
     || "greeting_observed";
 }
 
 function reviewedDeliverySummary(result: ReviewedSendExecution): string {
-  if (!result.evidenceCodes.some((code) => code === AUTOMATIC_APPLICATION_CLICK_ASSUMED_CODE || code === AUTOMATIC_GREETING_CLICK_ASSUMED_CODE)) {
+  if (!result.evidenceCodes.some((code) => code === AUTOMATIC_APPLICATION_CLICK_ASSUMED_CODE
+    || code === AUTOMATIC_APPLICATION_GREETING_CLICK_ASSUMED_CODE
+    || code === AUTOMATIC_GREETING_CLICK_ASSUMED_CODE)) {
     return "";
   }
   return [

@@ -167,7 +167,7 @@ State:
 - Delivery state is separate from draft opportunity state. Application and greeting each use pending/attempted/verified/failed; `reviewed_send` reaches succeeded only when both have platform-read evidence, while the current `automatic_send` development fallback may complete a dispatched final control with an explicit click-assumed evidence code.
 - Verified components cannot be downgraded or replayed. A repeated delivery request ID is a complete no-op even if its arguments differ.
 - A partial or post-write review reason is derived from both component states (including the verified component and the missing component); the most recent component event must not hide which component still needs evidence.
-- During the current development phase, `automatic_send` may treat a dispatched final application or greeting control as complete when page read-back is unavailable. It must record `application_click_assumed_success` or `greeting_click_assumed_success` and must not use this fallback for preflight blockers or `reviewed_send`.
+- During the current development phase, `automatic_send` may treat a dispatched final application or greeting control as complete when page read-back is unavailable. It must record `application_click_assumed_success`, `application_greeting_click_assumed_success`, or `greeting_click_assumed_success` and must not use this fallback for preflight blockers or `reviewed_send`.
 
 Auth and local storage:
 
@@ -361,7 +361,7 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 | One selected attachment + `立即投递` | Send already-selected default/attachment resumes, then require a rendered resume card for verified application |
 | `已沟通` without resume evidence | Keep application attempted/unverified |
 | Exact reviewed text appears as outbound chat content | Mark greeting verified |
-| Automatic final application/greeting control was dispatched but page read-back is unavailable | Record the component as complete with `application_click_assumed_success` or `greeting_click_assumed_success`; continue the automatic batch without replaying it |
+| Automatic final application/greeting control was dispatched but page read-back is unavailable | Record the component as complete with `application_click_assumed_success`, `application_greeting_click_assumed_success`, or `greeting_click_assumed_success`; continue the automatic batch without replaying it |
 | Automatic `delivery_confirmed` audit has exact bounded source evidence | Persist it before quota reservation; no Liepin write has begun yet |
 | Automatic source is missing, altered, attached to another event/code, or accompanied by an unknown key | Reject with `invalid_delivery_evidence` before quota and write-start |
 | Reviewed PREPARE has no exact open job tab | Open the authoritative Liepin canonical URL in a background tab and wait for read-only content preflight; do not touch quota/write state |

@@ -338,7 +338,7 @@ select lives_ok(
     'application_verified',
     'application',
     'verified',
-    'application_click_assumed_success'
+    'application_greeting_click_assumed_success'
   )$$,
   'automatic development mode can persist an application click-assumed completion'
 );

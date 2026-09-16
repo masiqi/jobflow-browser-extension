@@ -519,6 +519,7 @@ export async function executeLiepinReviewedSend(
   let surface = findExistingChatSurface(root);
   let reusedChatSurface = Boolean(surface);
   let applicationSubmitClicked = false;
+  let greetingSendClicked = false;
   if (!surface && applicationConfirmation?.status !== "ready") {
     const action = selectAction(root, platformJobId);
     if (!action.ok) {
@@ -629,6 +630,7 @@ export async function executeLiepinReviewedSend(
     };
   }
   dispatchAllowedClick(surface.send);
+  greetingSendClicked = true;
   if (assumeClickSuccess) {
     await new Promise((resolve) => setTimeout(resolve, LIEPIN_CLICK_ASSUMPTION_GRACE_MS));
   }
@@ -648,6 +650,7 @@ export async function executeLiepinReviewedSend(
     evidenceCodes: [
       applicationEvidenceCode,
       greeting === "verified" ? "outbound_greeting_exact_match" : "outbound_greeting_unverified",
+      ...(greetingSendClicked ? ["greeting_send_clicked"] : []),
       reusedChatSurface ? "chat_surface_reused" : "chat_surface_opened"
     ]
   };

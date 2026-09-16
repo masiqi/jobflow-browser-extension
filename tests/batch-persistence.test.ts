@@ -660,7 +660,7 @@ describe("batch run persistence", () => {
     });
   });
 
-  it("treats clicked automatic components as completed when page evidence is unavailable", async () => {
+  it("treats a greeting click as completion for an unresolved application in automatic mode", async () => {
     const run = automaticRunningBatch("delivery_ready");
     run.items[0]!.draftSha256 = await sourceHash(draft().currentText);
     localData[STORAGE_KEYS.run] = run;
@@ -706,8 +706,8 @@ describe("batch run persistence", () => {
         return {
           ok: false,
           application: "attempted",
-          greeting: "attempted",
-          evidenceCodes: ["application_submit_clicked", "outbound_greeting_unverified"]
+          greeting: "verified",
+          evidenceCodes: ["native_action_attempted", "outbound_greeting_exact_match", "greeting_send_clicked"]
         };
       }
       return undefined;
@@ -726,13 +726,13 @@ describe("batch run persistence", () => {
     }));
     expect(backend.recordReviewedDeliveryAttempt).toHaveBeenCalledWith(expect.objectContaining({
       eventKind: "application_verified",
-      evidenceCode: "application_click_assumed_success",
-      reason: "已点击猎聘正式投递控件，按开发阶段策略记为已发送（未等待页面回读）；已点击猎聘招呼语发送控件，按开发阶段策略记为已发送（未等待页面回读）"
+      evidenceCode: "application_greeting_click_assumed_success",
+      reason: "已点击猎聘招呼语发送控件，按开发阶段策略将投递并联系计为已发送（未等待页面回读）；招呼语已从猎聘页面验证"
     }));
     expect(backend.recordReviewedDeliveryAttempt).toHaveBeenCalledWith(expect.objectContaining({
       eventKind: "greeting_verified",
-      evidenceCode: "greeting_click_assumed_success",
-      reason: "已点击猎聘正式投递控件，按开发阶段策略记为已发送（未等待页面回读）；已点击猎聘招呼语发送控件，按开发阶段策略记为已发送（未等待页面回读）"
+      evidenceCode: "outbound_greeting_exact_match",
+      reason: "已点击猎聘招呼语发送控件，按开发阶段策略将投递并联系计为已发送（未等待页面回读）；招呼语已从猎聘页面验证"
     }));
   });
 

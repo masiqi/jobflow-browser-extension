@@ -58,7 +58,7 @@ The platform default greeting is not JobFlow greeting evidence. A rendered resum
 
 The job seeker explicitly chose to keep automatic batch testing moving despite the current Liepin desktop UI not always exposing reliable post-write read-back. For the `automatic_send` path only, once the job-bound final control has actually been dispatched, JobFlow may treat that component as completed for batch accounting:
 
-- clicking the final `立即投递` control produces `application_click_assumed_success`;
+- clicking the final `立即投递` control produces `application_click_assumed_success`; when the platform only exposes the greeting send control, the composite assumption uses `application_greeting_click_assumed_success`;
 - clicking the JobFlow greeting send control when the exact outbound message is not readable produces `greeting_click_assumed_success`;
 - the component is recorded as completed, the automatic batch continues, and that component is never automatically replayed;
 - the attempt history and user-facing reason explicitly say it was counted by click assumption and not by platform read-back;

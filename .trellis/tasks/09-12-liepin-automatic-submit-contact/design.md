@@ -128,7 +128,10 @@ delivery_in_progress
 -> next item without automatic replay
 ```
 
-This exception is available only to `automatic_send`. It does not apply to
+This exception is available only to `automatic_send`. If the final application
+control is not exposed but the greeting send control is dispatched, the
+application component uses `application_greeting_click_assumed_success` to
+make that composite development assumption explicit. The exception does not apply to
 preflight blockers, ambiguous resume selection, missing/disabled controls, or
 the stricter `reviewed_send` flow.
 

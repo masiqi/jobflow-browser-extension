@@ -111,7 +111,7 @@ JobFlow 是一个 Chrome Manifest V3 扩展。用户先使用猎聘自带的搜�
 - 只有模型直接判定 `proceed` 且生成有效草稿的职位会自动投递；模型 `review` 经用户“继续生成”后属于人工确认流程，不会被自动发送；
 - 已有历史草稿、用户作为例外继续的草稿、复核项和模型/规则排除项不会因为开启自动模式而自动发送；
 - 自动模式复用逐条确认的职位身份、草稿修订 SHA-256、最终预检、每日额度、写入边界、投递/招呼语独立证据和 verified 组件不重放规则；
-- 当前开发调试阶段，automatic_send 在真正点击职位绑定的 `立即投递` 或招呼语发送控件、但页面没有回读证据时，会用 `application_click_assumed_success` / `greeting_click_assumed_success` 记为已发送并继续批次；这不是平台回读验证，`reviewed_send` 仍保持严格核验；
+- 当前开发调试阶段，automatic_send 在真正点击职位绑定的 `立即投递` 或招呼语发送控件、但页面没有回读证据时，会用 `application_click_assumed_success`、`application_greeting_click_assumed_success` 或 `greeting_click_assumed_success` 记为已发送并继续批次；这不是平台回读验证，`reviewed_send` 仍保持严格核验；
 - 自动批次授权审计只保存 `automatic_batch_authorized` 和固定来源 `sidepanel_batch`，服务端以严格 allowlist 校验；
 - 登录、验证码、风险控制、默认简历不明确、职位页 DOM 不明确或额度耗尽会在写入前暂停整个批次；
 - 明确已暂停招聘或不可用的职位属于无写入终止结果，保留失败历史并继续后续职位，不要求用户反复恢复同一个职位；
