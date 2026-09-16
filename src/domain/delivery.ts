@@ -44,6 +44,7 @@ function deliveryComponentReason(
 }
 
 export function deliveryPartialReason(record: DeliveryRecord): string {
+  if (record.latestReason?.includes("按开发阶段策略记为已发送")) return record.latestReason;
   return [
     deliveryComponentReason("正式投递", record.applicationStatus),
     deliveryComponentReason("招呼语", record.greetingStatus)

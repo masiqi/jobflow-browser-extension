@@ -55,3 +55,10 @@ Reviewed PREPARE may now open the exact authoritative Liepin detail URL in a bac
 The user separately approved `automatic_send` for one side-panel selected batch at a time. The setting is opt-in and defaults to `reviewed_send` for existing users. A batch start command is accepted only from the exact extension side panel, carries the expected execution policy, and snapshots the selected platform job IDs plus authorization time. Opening, scanning, refreshing, saving settings, viewing records, extension startup, and existing drafts cannot authorize a write.
 
 Automatic mode reuses the reviewed-send delivery core: owned opportunity identity, current draft revision and SHA-256, final job-bound Liepin preflight, daily quota reservation, write-start marker, component attempts, and platform-read evidence. A pre-write blocker pauses without advancing the item. A post-write ambiguous or partial result advances the item, pauses the batch, and leaves recovery to the reviewed-send path. Verified components are never replayed. The implementation is synthetic-test covered, but real Chrome/Liepin manual acceptance is still required before this mode is described as accepted against the live site.
+
+## Amendment: development click-assumed automatic completion
+
+- Date: 2026-09-17
+- Status: Accepted for debugging only
+
+During the current live debugging phase, the user approved a narrower automatic-mode fallback because Liepin does not consistently expose a readable desktop result after a write. After the job-bound final application or greeting control is dispatched, `automatic_send` records that component as completed with an explicit click-assumed evidence code and continues the batch. This avoids replaying a component that the user may already have sent. It does not change the stricter `reviewed_send` behavior and must not be described as independent platform evidence.

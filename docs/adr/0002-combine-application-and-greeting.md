@@ -50,3 +50,19 @@ The first reviewed-send acceptance on 2026-09-11 established a platform-specific
 4. JobFlow sends its reviewed custom greeting and verifies the exact outbound rendered text.
 
 The platform default greeting is not JobFlow greeting evidence. A rendered resume card is application evidence; `已沟通` alone is not. Recovery reuses the open conversation and skips any component already verified.
+
+## Amendment: automatic click-assumed completion during development
+
+- Date: 2026-09-17
+- Status: Accepted for the current development/debugging phase
+
+The job seeker explicitly chose to keep automatic batch testing moving despite the current Liepin desktop UI not always exposing reliable post-write read-back. For the `automatic_send` path only, once the job-bound final control has actually been dispatched, JobFlow may treat that component as completed for batch accounting:
+
+- clicking the final `立即投递` control produces `application_click_assumed_success`;
+- clicking the JobFlow greeting send control when the exact outbound message is not readable produces `greeting_click_assumed_success`;
+- the component is recorded as completed, the automatic batch continues, and that component is never automatically replayed;
+- the attempt history and user-facing reason explicitly say it was counted by click assumption and not by platform read-back;
+- preflight blockers, ambiguous resume selection, missing composer, disabled controls, and any path that did not dispatch the final control remain failures/pauses;
+- `reviewed_send` keeps the stricter platform-read-back behavior unless separately changed.
+
+This is a deliberate development tradeoff, not evidence that Liepin accepted the request or that delivery reached its server. It can be reverted to the read-back-only policy after live behavior is understood.

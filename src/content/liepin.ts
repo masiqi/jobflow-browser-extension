@@ -173,7 +173,8 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
           command.platformJobId,
           command.draftText,
           command.needsApplication,
-          command.needsGreeting
+          command.needsGreeting,
+          command.assumeClickSuccess
         ));
       } catch (error) {
         sendResponse({

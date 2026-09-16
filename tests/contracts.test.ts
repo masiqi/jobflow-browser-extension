@@ -125,6 +125,16 @@ describe("runtime and endpoint contracts", () => {
       needsApplication: true,
       needsGreeting: false
     }).needsGreeting).toBe(false);
+    expect(liepinReviewedSendExecuteCommandSchema.parse({
+      type: "CONTENT_REVIEWED_SEND_EXECUTE",
+      leaseId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      platformJobId: "1980000301",
+      draftText: "合成招呼语",
+      draftSha256: "a".repeat(64),
+      needsApplication: true,
+      needsGreeting: true,
+      assumeClickSuccess: true
+    }).assumeClickSuccess).toBe(true);
     expect(() => liepinReviewedSendExecuteCommandSchema.parse({
       type: "CONTENT_REVIEWED_SEND_EXECUTE",
       leaseId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",

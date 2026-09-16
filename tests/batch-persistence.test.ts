@@ -660,6 +660,82 @@ describe("batch run persistence", () => {
     });
   });
 
+  it("treats clicked automatic components as completed when page evidence is unavailable", async () => {
+    const run = automaticRunningBatch("delivery_ready");
+    run.items[0]!.draftSha256 = await sourceHash(draft().currentText);
+    localData[STORAGE_KEYS.run] = run;
+    localData[STORAGE_KEYS.settings] = settings({}, {
+      executionPolicy: "automatic_send",
+      model: { ...DEFAULT_SETTINGS.model, route: "managed" },
+      automaticSendDelayMinSeconds: 5,
+      automaticSendDelayMaxSeconds: 5
+    });
+    backend.listDrafts.mockResolvedValue([draft()]);
+    backend.listOpportunities.mockResolvedValue([{ ...opportunity(), status: "draft_ready" }]);
+    let latestDelivery = delivery();
+    backend.recordReviewedDeliveryAttempt.mockImplementation(async (input: { eventKind: string; evidenceCode?: string; reason?: string }) => {
+      if (input.eventKind === "application_attempted") {
+        latestDelivery = delivery({ applicationStatus: "attempted", greetingStatus: "pending", overallStatus: "in_progress" });
+      }
+      if (input.eventKind === "greeting_attempted") {
+        latestDelivery = delivery({ applicationStatus: "attempted", greetingStatus: "attempted", overallStatus: "in_progress" });
+      }
+      if (input.eventKind === "application_verified") {
+        latestDelivery = delivery({
+          applicationStatus: "verified",
+          greetingStatus: "attempted",
+          overallStatus: "partial",
+          latestReason: input.reason
+        });
+      }
+      if (input.eventKind === "greeting_verified") {
+        latestDelivery = delivery({
+          applicationStatus: "verified",
+          greetingStatus: "verified",
+          overallStatus: "succeeded",
+          latestReason: input.reason
+        });
+      }
+      return latestDelivery;
+    });
+    (chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (_tabId: number, message: { type?: string }) => {
+      if (message.type === "CONTENT_REVIEWED_SEND_PREFLIGHT") {
+        return { ok: true, platformJobId: "1980000401", resumeMode: "platform_default", actionTier: "primary" };
+      }
+      if (message.type === "CONTENT_REVIEWED_SEND_EXECUTE") {
+        return {
+          ok: false,
+          application: "attempted",
+          greeting: "attempted",
+          evidenceCodes: ["application_submit_clicked", "outbound_greeting_unverified"]
+        };
+      }
+      return undefined;
+    });
+
+    alarmListener?.({ name: "jobflow:queue", scheduledTime: Date.now() } as chrome.alarms.Alarm);
+    await vi.waitFor(() => expect(batchRunSchema.parse(localData[STORAGE_KEYS.run]).status).toBe("completed"));
+
+    const completed = batchRunSchema.parse(localData[STORAGE_KEYS.run]);
+    expect(completed.deliverySucceededCount).toBe(1);
+    expect(completed.deliveryPartialCount).toBe(0);
+    expect(completed.items[0]).toMatchObject({ status: "delivery_succeeded" });
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(101, expect.objectContaining({
+      type: "CONTENT_REVIEWED_SEND_EXECUTE",
+      assumeClickSuccess: true
+    }));
+    expect(backend.recordReviewedDeliveryAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      eventKind: "application_verified",
+      evidenceCode: "application_click_assumed_success",
+      reason: "已点击猎聘正式投递控件，按开发阶段策略记为已发送（未等待页面回读）；已点击猎聘招呼语发送控件，按开发阶段策略记为已发送（未等待页面回读）"
+    }));
+    expect(backend.recordReviewedDeliveryAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      eventKind: "greeting_verified",
+      evidenceCode: "greeting_click_assumed_success",
+      reason: "已点击猎聘正式投递控件，按开发阶段策略记为已发送（未等待页面回读）；已点击猎聘招呼语发送控件，按开发阶段策略记为已发送（未等待页面回读）"
+    }));
+  });
+
   it("names the missing application evidence when greeting evidence is verified", async () => {
     const run = automaticRunningBatch("delivery_ready");
     run.items[0]!.draftSha256 = await sourceHash(draft().currentText);
@@ -1087,6 +1163,8 @@ describe("batch run persistence", () => {
 
     const freshLease = resumed.items[0]?.leaseId;
     expect(freshLease).toBeTypeOf("string");
+    resumed.items[0]!.startedAt = new Date(Date.now() - 8_000).toISOString();
+    localData[STORAGE_KEYS.run] = resumed;
     await dispatchDetailWithLease(detailJob("岗位职责：负责建设高可用任务平台和稳定性体系。"), freshLease!);
     alarmListener?.({ name: "jobflow:queue", scheduledTime: Date.now() } as chrome.alarms.Alarm);
     await vi.waitFor(() => expect(batchRunSchema.parse(localData[STORAGE_KEYS.run]).status).toBe("completed"));
@@ -2001,6 +2079,9 @@ describe("batch run persistence", () => {
     await vi.waitFor(() => expect(chrome.tabs.create).toHaveBeenCalledOnce());
     const lease = batchRunSchema.parse(localData[STORAGE_KEYS.run]).items[0]?.leaseId;
     expect(lease).toBeTypeOf("string");
+    const reopened = batchRunSchema.parse(localData[STORAGE_KEYS.run]);
+    reopened.items[0]!.startedAt = new Date(Date.now() - 8_000).toISOString();
+    localData[STORAGE_KEYS.run] = reopened;
     await dispatchDetailWithLease(detailJob("岗位职责：负责建设高可用任务平台和稳定性体系。"), lease!);
     alarmListener?.({ name: "jobflow:queue", scheduledTime: Date.now() } as chrome.alarms.Alarm);
     await vi.waitFor(() => expect(batchRunSchema.parse(localData[STORAGE_KEYS.run]).status).toBe("completed"));

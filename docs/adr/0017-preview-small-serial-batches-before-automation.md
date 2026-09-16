@@ -30,6 +30,13 @@ Drafting and dry-run activity do not consume this limit. Immediately before the 
 
 Automatic mode adds a current-device account/platform write interval. After any JobFlow Liepin write-start marker, including reviewed-send, the extension stores the next automatic-write timestamp. The interval defaults to a uniformly sampled integer from 10 to 20 seconds and is configurable from 5 to 600 seconds. It applies only to platform writes, not scanning, JD reading, model work, exclusions, or reviews.
 
+## Amendment: click-assumed completion for automatic debugging
+
+- Date: 2026-09-17
+- Status: Accepted for the current development phase
+
+When Liepin accepts a job-bound final application or greeting click but the desktop page does not expose a usable read-back result, `automatic_send` may count that clicked component as completed using an explicit click-assumed evidence code. The batch continues and will not replay that component. This fallback does not apply to pre-write blockers or `reviewed_send`, and the user-facing history states that the result was counted by click rather than independently verified by Liepin.
+
 ## Consequences
 
 - First-milestone throughput is deliberately limited while extraction and draft quality are calibrated.

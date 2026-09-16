@@ -356,7 +356,9 @@ Before changing a platform adapter:
 After changing the adapter:
 
 - [ ] Assert that a post-write timeout remains `attempted`/needs-review rather
-      than being promoted by a user assertion or an input/button state change.
+      than being promoted by a user assertion or an input/button state change,
+      unless an explicitly approved development policy has dispatched the final
+      control and records its separate click-assumed evidence code.
 - [ ] Assert that verified components are not replayed when a recovery path runs.
 - [ ] Record the platform selector contract and the evidence limitation in the
       cross-layer spec and task retrospective.

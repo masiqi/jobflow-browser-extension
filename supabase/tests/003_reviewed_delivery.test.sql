@@ -1,5 +1,5 @@
 begin;
-select plan(30);
+select plan(33);
 
 insert into auth.users (
   id, instance_id, aud, role, email, encrypted_password,
@@ -329,6 +329,34 @@ select is(
   (select overall_status from public.delivery_records where opportunity_id = '00000000-0000-4000-8000-000000000031'),
   'succeeded',
   'both independent components produce succeeded'
+);
+
+select lives_ok(
+  $$select public.record_reviewed_delivery_attempt(
+    '00000000-0000-4000-8000-000000000034',
+    '00000000-0000-4000-8000-000000000072',
+    'application_verified',
+    'application',
+    'verified',
+    'application_click_assumed_success'
+  )$$,
+  'automatic development mode can persist an application click-assumed completion'
+);
+select lives_ok(
+  $$select public.record_reviewed_delivery_attempt(
+    '00000000-0000-4000-8000-000000000034',
+    '00000000-0000-4000-8000-000000000073',
+    'greeting_verified',
+    'greeting',
+    'verified',
+    'greeting_click_assumed_success'
+  )$$,
+  'automatic development mode can persist a greeting click-assumed completion'
+);
+select is(
+  (select overall_status from public.delivery_records where opportunity_id = '00000000-0000-4000-8000-000000000034'),
+  'succeeded',
+  'click-assumed components produce a terminal delivery record'
 );
 
 select * from finish();

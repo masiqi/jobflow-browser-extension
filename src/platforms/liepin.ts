@@ -7,6 +7,7 @@ const text = (root: ParentNode, selector: string): string => {
 };
 const LIEPIN_CHAT_SURFACE_TIMEOUT_MS = 15_000;
 const LIEPIN_GREETING_EVIDENCE_TIMEOUT_MS = 15_000;
+const LIEPIN_CLICK_ASSUMPTION_GRACE_MS = 1_000;
 
 export function isLiepinListPage(location: Location = window.location): boolean {
   if (!/(^|\.)liepin\.com$/.test(location.hostname)) return false;
@@ -492,7 +493,8 @@ export async function executeLiepinReviewedSend(
   platformJobId: string,
   draftText: string,
   needsApplication = true,
-  needsGreeting = true
+  needsGreeting = true,
+  assumeClickSuccess = false
 ): Promise<LiepinReviewedSendResult> {
   if (!needsApplication && !needsGreeting) {
     return {
@@ -516,6 +518,7 @@ export async function executeLiepinReviewedSend(
   let applicationConfirmation = findApplicationConfirmation(root);
   let surface = findExistingChatSurface(root);
   let reusedChatSurface = Boolean(surface);
+  let applicationSubmitClicked = false;
   if (!surface && applicationConfirmation?.status !== "ready") {
     const action = selectAction(root, platformJobId);
     if (!action.ok) {
@@ -551,17 +554,27 @@ export async function executeLiepinReviewedSend(
     }
   }
   if (needsApplication && application !== "verified" && applicationConfirmation?.status === "ready") {
+    applicationSubmitClicked = true;
     dispatchAllowedClick(applicationConfirmation.control);
-    await waitForObservation(
-      () => applicationVerified(root, platformJobId, surface?.root) || newApplicationEvidence(root, applicationEvidenceBefore),
-      4000
-    );
+    if (!assumeClickSuccess) {
+      await waitForObservation(
+        () => applicationVerified(root, platformJobId, surface?.root) || newApplicationEvidence(root, applicationEvidenceBefore),
+        4000
+      );
+    } else {
+      await new Promise((resolve) => setTimeout(resolve, LIEPIN_CLICK_ASSUMPTION_GRACE_MS));
+    }
   }
   application = !needsApplication
     ? "verified"
     : applicationVerified(root, platformJobId, surface?.root) || newApplicationEvidence(root, applicationEvidenceBefore)
     ? "verified"
     : "attempted";
+  const applicationEvidenceCode = application === "verified"
+    ? "application_status_verified"
+    : applicationSubmitClicked
+      ? "application_submit_clicked"
+      : "native_action_attempted";
   if (hasAmbiguousResumePicker(root)) {
     return {
       ok: false,
@@ -577,7 +590,7 @@ export async function executeLiepinReviewedSend(
       application,
       greeting: "verified",
       evidenceCodes: [
-        application === "verified" ? "application_status_verified" : "native_action_attempted",
+        applicationEvidenceCode,
         "outbound_greeting_exact_match",
         reusedChatSurface ? "chat_surface_reused" : "chat_surface_opened"
       ]
@@ -589,7 +602,7 @@ export async function executeLiepinReviewedSend(
       application,
       greeting: "verified",
       evidenceCodes: [
-        application === "verified" ? "application_status_verified" : "native_action_attempted",
+        applicationEvidenceCode,
         "greeting_already_verified",
         reusedChatSurface ? "chat_surface_reused" : "chat_surface_opened"
       ]
@@ -600,7 +613,7 @@ export async function executeLiepinReviewedSend(
       ok: false,
       application,
       greeting: "failed",
-      evidenceCodes: [application === "verified" ? "application_status_verified" : "native_action_attempted", "composer_missing"],
+      evidenceCodes: [applicationEvidenceCode, "composer_missing"],
       reason: "聊一聊后未找到可填写的消息框"
     };
   }
@@ -611,15 +624,21 @@ export async function executeLiepinReviewedSend(
       ok: false,
       application,
       greeting: "failed",
-      evidenceCodes: [application === "verified" ? "application_status_verified" : "native_action_attempted", "send_control_disabled"],
+      evidenceCodes: [applicationEvidenceCode, "send_control_disabled"],
       reason: "填写招呼语后发送按钮仍不可用"
     };
   }
   dispatchAllowedClick(surface.send);
-  const greeting = await waitForObservation(
-    () => outboundGreetingVerified(surface.root, draftText),
-    LIEPIN_GREETING_EVIDENCE_TIMEOUT_MS
-  )
+  if (assumeClickSuccess) {
+    await new Promise((resolve) => setTimeout(resolve, LIEPIN_CLICK_ASSUMPTION_GRACE_MS));
+  }
+  const greetingObserved = assumeClickSuccess
+    ? outboundGreetingVerified(surface.root, draftText)
+    : await waitForObservation(
+      () => outboundGreetingVerified(surface.root, draftText),
+      LIEPIN_GREETING_EVIDENCE_TIMEOUT_MS
+    );
+  const greeting = greetingObserved
     ? "verified"
     : "attempted";
   return {
@@ -627,7 +646,7 @@ export async function executeLiepinReviewedSend(
     application,
     greeting,
     evidenceCodes: [
-      application === "verified" ? "application_status_verified" : "native_action_attempted",
+      applicationEvidenceCode,
       greeting === "verified" ? "outbound_greeting_exact_match" : "outbound_greeting_unverified",
       reusedChatSurface ? "chat_surface_reused" : "chat_surface_opened"
     ]

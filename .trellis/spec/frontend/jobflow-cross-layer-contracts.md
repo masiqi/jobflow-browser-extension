@@ -86,6 +86,7 @@ Reviewed-send runtime commands:
 { type: "CONFIRM_REVIEWED_SEND", opportunityId, draftRevisionId, draftSha256 }
 { type: "CONTENT_REVIEWED_SEND_PREFLIGHT", leaseId, platformJobId }
 { type: "CONTENT_REVIEWED_SEND_EXECUTE", leaseId, platformJobId, draftText, draftSha256, needsApplication, needsGreeting }
+// automatic_send may additionally set assumeClickSuccess=true; reviewed_send omits it
 ~~~
 
 Observed Liepin IM surface contract:
@@ -163,9 +164,10 @@ State:
 - Named RPCs validate the prior state and derive the next state.
 - Request IDs make processing event and revision retries idempotent.
 - An LLM exclusion blocks automatic reevaluation by identity; user_override adds an exception without deleting the exclusion.
-- Delivery state is separate from draft opportunity state. Application and greeting each use pending/attempted/verified/failed; overall state is derived and reaches succeeded only when both are verified.
+- Delivery state is separate from draft opportunity state. Application and greeting each use pending/attempted/verified/failed; `reviewed_send` reaches succeeded only when both have platform-read evidence, while the current `automatic_send` development fallback may complete a dispatched final control with an explicit click-assumed evidence code.
 - Verified components cannot be downgraded or replayed. A repeated delivery request ID is a complete no-op even if its arguments differ.
 - A partial or post-write review reason is derived from both component states (including the verified component and the missing component); the most recent component event must not hide which component still needs evidence.
+- During the current development phase, `automatic_send` may treat a dispatched final application or greeting control as complete when page read-back is unavailable. It must record `application_click_assumed_success` or `greeting_click_assumed_success` and must not use this fallback for preflight blockers or `reviewed_send`.
 
 Auth and local storage:
 
@@ -272,6 +274,7 @@ Reviewed send:
 - `已沟通` is not formal application evidence. A new or existing resume card inside the current job's unique chat surface is application evidence.
 - Greeting verification requires a non-input visible leaf inside the unique `.im-ui-chat-container` whose normalized text exactly equals the confirmed draft; the input wrapper alone is not a valid evidence root.
 - Result events store only bounded evidence codes/counts/lengths and revision/hash references, never DOM, Cookie, recruiter identifiers, or duplicate message content.
+- Automatic click-assumed completion stores only the bounded click-assumption evidence code and reason; it is deliberately distinct from platform-read evidence and prevents automatic replay of that component.
 - Client-side delivery persistence errors may expose only allowlisted database error codes such as `invalid_delivery_evidence` or `stale_delivery_hash`; arbitrary PostgREST messages, SQL, hints, details, and payloads remain hidden.
 
 Environment:
@@ -358,14 +361,15 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 | One selected attachment + `立即投递` | Send already-selected default/attachment resumes, then require a rendered resume card for verified application |
 | `已沟通` without resume evidence | Keep application attempted/unverified |
 | Exact reviewed text appears as outbound chat content | Mark greeting verified |
+| Automatic final application/greeting control was dispatched but page read-back is unavailable | Record the component as complete with `application_click_assumed_success` or `greeting_click_assumed_success`; continue the automatic batch without replaying it |
 | Automatic `delivery_confirmed` audit has exact bounded source evidence | Persist it before quota reservation; no Liepin write has begun yet |
 | Automatic source is missing, altered, attached to another event/code, or accompanied by an unknown key | Reject with `invalid_delivery_evidence` before quota and write-start |
 | Reviewed PREPARE has no exact open job tab | Open the authoritative Liepin canonical URL in a background tab and wait for read-only content preflight; do not touch quota/write state |
 | Existing exact reviewed-send tab has a stale content context | Reload that exact tab once and retry bounded preflight; never reload unrelated tabs |
 | URL job ID ends with the action's eight-digit numeric `data-jobid` | Treat the action as job-bound; unrelated/short/nonnumeric IDs remain ineligible |
 | Detail refresh repeats after draft generation | Refresh JD fields without downgrading `draft_ready`; recovery skips duplicate detail persistence |
-| One component verified | Derive partial and retry only the missing component |
-| Both components verified | Derive succeeded and hide replay controls |
+| One component verified in reviewed-send | Derive partial and retry only the missing component |
+| Both components verified in reviewed-send, or both automatic components are completed by platform-read/click-assumed evidence | Derive succeeded and hide automatic replay controls |
 | Duplicate automatic queue wake for one run | At most one path acquires the live-write mutex; the loser does not preflight or write |
 | Automatic wait alarm fires before `nextWriteEligibleAt` | Preserve the same timestamp and reschedule without redrawing delay or touching quota/write |
 | Automatic wait alarm fires after pause, cancel, completion, or run replacement | Treat as stale and ignore; cancel clears that run's alarm |
@@ -401,12 +405,12 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 - Good: an automatic run paused before write resumes by reopening a fresh matching detail page and using the persisted authoritative draft identity; it does not rerun suitability or greeting generation.
 - Good: an elapsed automatic interval alarm runs a fresh final preflight and may write only if the run/item/policy/job/draft identities still match.
 - Bad: treat a visible side-panel countdown reaching zero as authorization to send, or replay `delivery_in_progress` after a browser restart.
-- Bad: interpret `dispatchEvent()` return value, a completed click promise, `已沟通`, or absence of an exception as successful application.
+- Bad outside the approved automatic development fallback: interpret `dispatchEvent()` return value, a completed click promise, `已沟通`, or absence of an exception as platform-verified application.
 - Bad: choose the first textarea or `发送` text from the whole document instead of a unique chat-local composer/control pair.
 - Bad: decide visibility from the leaf element alone, require every Liepin send control to be a `button/a`, or assume the remotely loaded IM must render within four seconds.
 - Bad: use only top-level `document.querySelectorAll`, inject into every iframe, or try to pierce a cross-origin frame to find a chat editor.
 - Bad: discard a visible chat surface because its empty-state send button has `pointer-events:none`, or click a control merely because it is rendered without checking its disabled state.
-- Bad: use the input wrapper as the only read-back root when the message list is its sibling, or treat an attempted send as verified without rendered outbound evidence.
+- Bad outside the approved automatic development fallback: use the input wrapper as the only read-back root when the message list is its sibling, or treat an attempted send as platform-verified without rendered outbound evidence.
 - Bad: store a raw BYOK string without ownerId or allow content-script storage access.
 - Bad: update current_status directly from UI or delete the event that explains it.
 - Bad: add https://*/* for custom providers; provider traffic leaves through the Edge Function.

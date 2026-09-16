@@ -742,6 +742,7 @@ async function processAutomaticDelivery(run: BatchRun, item: BatchItem): Promise
       draftSha256: item.draftSha256,
       authorizationEvidenceCode: "automatic_batch_authorized",
       settings,
+      assumeClickSuccess: true,
       beforeWrite: async () => {
         await guardAutomaticBeforeWrite(run.id, item.candidate.jobId, ownerId);
       },
@@ -766,6 +767,7 @@ async function processAutomaticDelivery(run: BatchRun, item: BatchItem): Promise
         deliveryPartialReason(latest),
         now()
       );
+    await waitForMinimumDetailDwell(tabToClose);
     await closeItemTab(tabToClose);
     await saveRun(completed);
     await notifyState();
@@ -783,6 +785,7 @@ async function processAutomaticDelivery(run: BatchRun, item: BatchItem): Promise
         message,
         now()
       );
+    await waitForMinimumDetailDwell(tabToClose);
     await closeItemTab(tabToClose);
     await saveRun(paused);
     await notifyState();
@@ -1235,7 +1238,15 @@ function parseReviewedSendPreflight(raw: unknown): { ok: boolean; reason?: strin
   }).strict().parse(raw);
 }
 
-function parseReviewedSendExecution(raw: unknown): { ok: boolean; application: "attempted" | "verified" | "failed"; greeting: "attempted" | "verified" | "failed"; evidenceCodes: string[]; reason?: string } {
+interface ReviewedSendExecution {
+  ok: boolean;
+  application: "attempted" | "verified" | "failed";
+  greeting: "attempted" | "verified" | "failed";
+  evidenceCodes: string[];
+  reason?: string;
+}
+
+function parseReviewedSendExecution(raw: unknown): ReviewedSendExecution {
   return z.object({
     ok: z.boolean(),
     application: z.enum(["attempted", "verified", "failed"]),
@@ -1243,6 +1254,29 @@ function parseReviewedSendExecution(raw: unknown): { ok: boolean; application: "
     evidenceCodes: z.array(z.string().max(80)).max(8),
     reason: z.string().max(200).optional()
   }).strict().parse(raw);
+}
+
+const AUTOMATIC_APPLICATION_CLICK_ASSUMED_CODE = "application_click_assumed_success";
+const AUTOMATIC_GREETING_CLICK_ASSUMED_CODE = "greeting_click_assumed_success";
+
+function assumeAutomaticClickSuccess(result: ReviewedSendExecution): ReviewedSendExecution {
+  const applicationAssumed = result.application === "attempted"
+    && result.evidenceCodes.includes("application_submit_clicked");
+  const greetingAssumed = result.greeting === "attempted"
+    && result.evidenceCodes.includes("outbound_greeting_unverified");
+  const application = applicationAssumed ? "verified" : result.application;
+  const greeting = greetingAssumed ? "verified" : result.greeting;
+  return {
+    ...result,
+    ok: application === "verified" && greeting === "verified",
+    application,
+    greeting,
+    evidenceCodes: [
+      ...result.evidenceCodes,
+      ...(applicationAssumed ? [AUTOMATIC_APPLICATION_CLICK_ASSUMED_CODE] : []),
+      ...(greetingAssumed ? [AUTOMATIC_GREETING_CLICK_ASSUMED_CODE] : [])
+    ]
+  };
 }
 
 function reviewedComponentReason(
@@ -1261,6 +1295,48 @@ function reviewedComponentReason(
   return "招呼语发送未完成";
 }
 
+function reviewedComponentReasonForResult(
+  component: "application" | "greeting",
+  result: ReviewedSendExecution
+): string {
+  if (component === "application" && result.evidenceCodes.includes(AUTOMATIC_APPLICATION_CLICK_ASSUMED_CODE)) {
+    return clickAssumptionReason(component);
+  }
+  if (component === "greeting" && result.evidenceCodes.includes(AUTOMATIC_GREETING_CLICK_ASSUMED_CODE)) {
+    return clickAssumptionReason(component);
+  }
+  return reviewedComponentReason(component, component === "application" ? result.application : result.greeting, result.reason);
+}
+
+function clickAssumptionReason(component: "application" | "greeting"): string {
+  return component === "application"
+    ? "已点击猎聘正式投递控件，按开发阶段策略记为已发送（未等待页面回读）"
+    : "已点击猎聘招呼语发送控件，按开发阶段策略记为已发送（未等待页面回读）";
+}
+
+function reviewedComponentEvidenceCode(
+  component: "application" | "greeting",
+  result: ReviewedSendExecution
+): string {
+  const assumedCode = component === "application"
+    ? AUTOMATIC_APPLICATION_CLICK_ASSUMED_CODE
+    : AUTOMATIC_GREETING_CLICK_ASSUMED_CODE;
+  if (result.evidenceCodes.includes(assumedCode)) return assumedCode;
+  if (component === "application") return result.evidenceCodes[0] || "application_observed";
+  return result.evidenceCodes.find((code) => code.includes("greeting") || code.includes("composer") || code.includes("send_"))
+    || "greeting_observed";
+}
+
+function reviewedDeliverySummary(result: ReviewedSendExecution): string {
+  if (!result.evidenceCodes.some((code) => code === AUTOMATIC_APPLICATION_CLICK_ASSUMED_CODE || code === AUTOMATIC_GREETING_CLICK_ASSUMED_CODE)) {
+    return "";
+  }
+  return [
+    reviewedComponentReasonForResult("application", result),
+    reviewedComponentReasonForResult("greeting", result)
+  ].join("；");
+}
+
 interface DeliveryCoreInput {
   opportunity: OpportunityRecord;
   draftText: string;
@@ -1271,6 +1347,7 @@ interface DeliveryCoreInput {
   draftSha256: string;
   authorizationEvidenceCode: "user_confirmed" | "automatic_batch_authorized";
   settings: ExtensionSettings;
+  assumeClickSuccess?: boolean;
   beforeWrite?: () => Promise<void>;
   onWriteStarted?: () => Promise<void>;
 }
@@ -1318,6 +1395,7 @@ async function executeReviewedDeliveryCore(input: DeliveryCoreInput): Promise<De
     draftSha256,
     authorizationEvidenceCode,
     settings,
+    assumeClickSuccess = false,
     beforeWrite,
     onWriteStarted
   } = input;
@@ -1418,15 +1496,18 @@ async function executeReviewedDeliveryCore(input: DeliveryCoreInput): Promise<De
         draftSha256
       });
     }
-    const result = parseReviewedSendExecution(await sendDeliveryContentMessage(tabId, {
+    const observedResult = parseReviewedSendExecution(await sendDeliveryContentMessage(tabId, {
       type: "CONTENT_REVIEWED_SEND_EXECUTE",
       leaseId,
       platformJobId: opportunity.platformJobId,
       draftText,
       draftSha256,
       needsApplication,
-      needsGreeting
+      needsGreeting,
+      assumeClickSuccess
     }, "真实投递结果读取超时"));
+    const result = assumeClickSuccess ? assumeAutomaticClickSuccess(observedResult) : observedResult;
+    const resultSummary = reviewedDeliverySummary(result);
     let latest = delivery;
     if (needsApplication) {
       latest = await recordReviewedDeliveryAttempt({
@@ -1435,9 +1516,9 @@ async function executeReviewedDeliveryCore(input: DeliveryCoreInput): Promise<De
         eventKind: result.application === "verified" ? "application_verified" : result.application === "failed" ? "application_failed" : "application_attempted",
         component: "application",
         status: result.application,
-        evidenceCode: result.evidenceCodes[0] || "application_observed",
+        evidenceCode: reviewedComponentEvidenceCode("application", result),
         evidence: { codeCount: result.evidenceCodes.length },
-        reason: reviewedComponentReason("application", result.application, result.reason),
+        reason: resultSummary || reviewedComponentReasonForResult("application", result),
         reservationId,
         draftRevisionId,
         draftSha256
@@ -1450,9 +1531,9 @@ async function executeReviewedDeliveryCore(input: DeliveryCoreInput): Promise<De
         eventKind: result.greeting === "verified" ? "greeting_verified" : result.greeting === "failed" ? "greeting_failed" : "greeting_attempted",
         component: "greeting",
         status: result.greeting,
-        evidenceCode: result.evidenceCodes.find((code) => code.includes("greeting") || code.includes("composer") || code.includes("send_")) || "greeting_observed",
+        evidenceCode: reviewedComponentEvidenceCode("greeting", result),
         evidence: { textLength: Array.from(draftText).length },
-        reason: reviewedComponentReason("greeting", result.greeting, result.reason),
+        reason: resultSummary || reviewedComponentReasonForResult("greeting", result),
         reservationId,
         draftRevisionId,
         draftSha256

@@ -38,6 +38,8 @@ The follow-up fix now waits 15 seconds for greeting evidence, recognizes the pla
 
 A related presentation bug surfaced after the adapter began returning independent component results: when greeting verification succeeded but application verification did not, the final `latestReason` was the greeting success message, so the batch appeared to pause “because greeting was verified.” The partial reason is now derived from both component statuses and is reused by automatic batch state plus record-center views. This keeps the required pause while naming the missing application evidence and prevents an event-ordering detail from obscuring recovery work.
 
+For the active debugging phase, the user then approved a deliberate behavior change: when a job-bound final application or greeting control is actually clicked but the page cannot be read back, `automatic_send` treats that component as complete and continues. The content command skips the long read-back wait in this mode, adds a short click grace, and the background records `application_click_assumed_success` or `greeting_click_assumed_success`. This mode is limited to automatic batches; preflight blockers and reviewed-send remain strict, and the reason states that the result was counted by click rather than independently verified.
+
 ### 5. Knowledge Capture
 
 - [x] Updated the cross-layer contract with the observed IM namespace, timeout, visibility, validation cases, and required assertions.

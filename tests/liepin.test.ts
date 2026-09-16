@@ -611,6 +611,46 @@ describe("Liepin list extraction", () => {
     }
   });
 
+  it("returns after the automatic send click without waiting for greeting read-back", async () => {
+    vi.useFakeTimers();
+    try {
+      const draft = "您好，这是一条按点击成功计入的自动批次合成招呼语。";
+      let sendClicks = 0;
+      document.body.innerHTML = `
+        <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+        <section id="chat-host"></section>`;
+      document.querySelector(".btn-main")?.addEventListener("click", () => {
+        document.querySelector("#chat-host")!.innerHTML = `
+          <section class="im-ui-chat-container">
+            <div data-jobid="1980000301">简历已发送 1980000301</div>
+            <section class="im-ui-chat-input">
+              <textarea class="im-ui-textarea"></textarea>
+              <button class="im-ui-basic-send-btn">发送</button>
+            </section>
+          </section>`;
+        document.querySelector(".im-ui-basic-send-btn")?.addEventListener("click", () => { sendClicks += 1; });
+      });
+
+      const execution = executeLiepinReviewedSend(
+        document,
+        "https://www.liepin.com/a/1980000301.shtml",
+        "1980000301",
+        draft,
+        true,
+        true,
+        true
+      );
+      await vi.advanceTimersByTimeAsync(2_500);
+      const result = await execution;
+
+      expect(result).toMatchObject({ ok: false, application: "verified", greeting: "attempted" });
+      expect(result.evidenceCodes).toContain("outbound_greeting_unverified");
+      expect(sendClicks).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not reuse a chat surface hidden by an ancestor before the action opens it", async () => {
     const draft = "您好，这是一条只发送到已经打开的可见会话中的合成招呼语。";
     let actionClicks = 0;
@@ -667,6 +707,43 @@ describe("Liepin list extraction", () => {
 
       expect(result.application).toBe("attempted");
       expect(result.ok).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports a distinct application click marker only after the final resume submit control is clicked", async () => {
+    vi.useFakeTimers();
+    try {
+      let applicationClicks = 0;
+      document.body.innerHTML = `
+        <section class="resume-dialog">
+          <h2>选择附件简历</h2>
+          <label><input type="radio" name="resume" checked>合成附件简历</label>
+          <button>立即投递</button>
+        </section>
+        <section class="im-ui-chat-container">
+          <section class="im-ui-chat-input">
+            <textarea class="im-ui-textarea"></textarea>
+            <button class="im-ui-basic-send-btn">发送</button>
+          </section>
+        </section>`;
+      document.querySelector(".resume-dialog button")?.addEventListener("click", () => { applicationClicks += 1; });
+
+      const execution = executeLiepinReviewedSend(
+        document,
+        "https://www.liepin.com/a/1980000301.shtml",
+        "1980000301",
+        "不应在没有页面回读时重复提交的合成招呼语",
+        true,
+        false
+      );
+      await vi.advanceTimersByTimeAsync(5_000);
+      const result = await execution;
+
+      expect(result.application).toBe("attempted");
+      expect(result.evidenceCodes).toContain("application_submit_clicked");
+      expect(applicationClicks).toBe(1);
     } finally {
       vi.useRealTimers();
     }

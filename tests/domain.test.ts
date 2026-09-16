@@ -130,4 +130,17 @@ describe("reviewed delivery projection", () => {
       "正式投递已尝试，尚未取得独立平台证据；招呼语已从猎聘页面验证"
     );
   });
+
+  it("preserves click-assumed provenance when a later component is partial", () => {
+    const reason = "已点击猎聘正式投递控件，按开发阶段策略记为已发送（未等待页面回读）；招呼语未完成";
+    const partial: DeliveryRecord = {
+      ...delivery,
+      overallStatus: "partial",
+      applicationStatus: "verified",
+      greetingStatus: "failed",
+      latestReason: reason
+    };
+
+    expect(deliveryPartialReason(partial)).toBe(reason);
+  });
 });

@@ -193,7 +193,8 @@ export const liepinReviewedSendExecuteCommandSchema = z.object({
   draftText: z.string().min(1).max(200),
   draftSha256: z.string().regex(/^[a-f0-9]{64}$/),
   needsApplication: z.boolean(),
-  needsGreeting: z.boolean()
+  needsGreeting: z.boolean(),
+  assumeClickSuccess: z.boolean().optional()
 }).strict();
 
 const sourceKindSchema = z.enum(["pdf", "docx", "text", "markdown", "pasted"]);
