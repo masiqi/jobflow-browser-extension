@@ -5,21 +5,58 @@ import {
   extractLiepinDetail,
   isLiepinDetailPage,
   isLiepinListPage,
+  liepinBlockedPageReason,
   preflightLiepinReviewedSend,
   scanLiepinList
 } from "../platforms/liepin";
 import {
   liepinReviewedSendExecuteCommandSchema,
-  liepinReviewedSendPreflightCommandSchema
+  liepinReviewedSendPreflightCommandSchema,
+  type DetailFailureCode
 } from "../domain/messages";
 
 interface CommandResponse {
   ok: boolean;
   error?: string;
+  data?: unknown;
 }
 
+type RuntimeMessageResult<T> =
+  | { kind: "response"; value: T }
+  | { kind: "context_unavailable" }
+  | { kind: "transport_error"; error: string };
+
 const REVIEWED_SEND_PREFLIGHT_TTL_MS = 5 * 60 * 1000;
+const DETAIL_LEASE_HANDSHAKE_ATTEMPTS = 20;
+const DETAIL_LEASE_HANDSHAKE_INTERVAL_MS = 250;
 const reviewedSendPreflights = new Map<string, { platformJobId: string; preparedAt: number }>();
+
+function errorMessage(error: unknown, fallback: string): string {
+  return (error instanceof Error && error.message ? error.message : fallback).slice(0, 300);
+}
+
+function isExtensionContextInvalidated(error: unknown): boolean {
+  return error instanceof Error && /extension context invalidated/i.test(error.message);
+}
+
+async function sendRuntimeMessage<T>(message: object): Promise<RuntimeMessageResult<T>> {
+  const runtime = globalThis.chrome?.runtime;
+  if (!runtime || typeof runtime.sendMessage !== "function") return { kind: "context_unavailable" };
+  try {
+    return { kind: "response", value: await runtime.sendMessage(message) as T };
+  } catch (error) {
+    if (isExtensionContextInvalidated(error)) return { kind: "context_unavailable" };
+    return { kind: "transport_error", error: errorMessage(error, "扩展后台通信失败") };
+  }
+}
+
+function isCommandResponse(value: unknown): value is CommandResponse {
+  return !!value && typeof value === "object" && typeof (value as { ok?: unknown }).ok === "boolean";
+}
+
+function reportUnexpectedError(operation: string, error: unknown): void {
+  console.warn(`[JobFlow] ${operation}：${errorMessage(error, "未知错误")}`);
+}
 
 async function sha256Text(value: string): Promise<string> {
   const bytes = new TextEncoder().encode(value);
@@ -42,8 +79,15 @@ function mountLauncher(): void {
     "stroke-width": 2
   }));
   button.addEventListener("click", async () => {
-    const response: CommandResponse = await chrome.runtime.sendMessage({ type: "OPEN_SIDE_PANEL" });
-    if (!response.ok) button.title = response.error || "无法打开 JobFlow";
+    const result = await sendRuntimeMessage<unknown>({ type: "OPEN_SIDE_PANEL" });
+    if (result.kind === "context_unavailable") return;
+    if (result.kind === "transport_error") {
+      button.title = result.error;
+      return;
+    }
+    if (!isCommandResponse(result.value) || !result.value.ok) {
+      button.title = isCommandResponse(result.value) ? result.value.error || "无法打开 JobFlow" : "扩展后台返回无效响应";
+    }
   });
   const style = document.createElement("style");
   style.textContent = [
@@ -151,51 +195,144 @@ function leaseFromLocation(): string | null {
   return value && /^[0-9a-f-]{36}$/i.test(value) ? value : null;
 }
 
+function jobIdFromLiepinDetailUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    const isLiepinHost = url.hostname === "liepin.com" || url.hostname.endsWith(".liepin.com");
+    if (url.protocol !== "https:" || !isLiepinHost) return "";
+    return url.pathname.match(/\/(?:job|a)\/(\d+)\.shtml/i)?.[1] || "";
+  } catch {
+    return "";
+  }
+}
+
+function jobIdFromLocation(): string {
+  const direct = jobIdFromLiepinDetailUrl(location.href);
+  if (direct) return direct;
+  const backUrl = new URLSearchParams(location.search).get("backurl");
+  return backUrl ? jobIdFromLiepinDetailUrl(backUrl) : "";
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function requestDetailLease(jobId: string): Promise<{ leaseId: string | null; shouldRetry: boolean }> {
+  if (!jobId) return { leaseId: null, shouldRetry: false };
+  const result = await sendRuntimeMessage<unknown>({
+    type: "DETAIL_PAGE_READY",
+    jobId
+  });
+  if (result.kind === "context_unavailable") return { leaseId: null, shouldRetry: false };
+  if (result.kind === "transport_error") return { leaseId: null, shouldRetry: true };
+  const response = result.value;
+  return {
+    leaseId: isCommandResponse(response)
+      && response.ok
+      && typeof response.data === "string"
+      && /^[0-9a-f-]{36}$/i.test(response.data)
+      ? response.data
+      : null,
+    shouldRetry: true
+  };
+}
+
+async function detailLeaseForCurrentPage(): Promise<string | null> {
+  const hashLease = leaseFromLocation();
+  if (hashLease) return hashLease;
+  const jobId = jobIdFromLocation();
+  for (let attempt = 0; attempt < DETAIL_LEASE_HANDSHAKE_ATTEMPTS; attempt += 1) {
+    const result = await requestDetailLease(jobId);
+    if (result.leaseId) return result.leaseId;
+    if (!result.shouldRetry) return null;
+    if (attempt < DETAIL_LEASE_HANDSHAKE_ATTEMPTS - 1) await delay(DETAIL_LEASE_HANDSHAKE_INTERVAL_MS);
+  }
+  return null;
+}
+
+async function reportDetailFailure(
+  code: DetailFailureCode,
+  jobId: string,
+  leaseId: string,
+  error: string
+): Promise<void> {
+  const result = await sendRuntimeMessage<unknown>({
+    type: "DETAIL_FAILED",
+    code,
+    jobId,
+    leaseId,
+    error
+  });
+  if (result.kind === "transport_error") reportUnexpectedError("详情失败状态上报失败", result.error);
+}
+
 async function reportLeasedDetail(): Promise<void> {
-  const leaseId = leaseFromLocation();
-  if (!leaseId || !isLiepinDetailPage()) return;
+  const isDetailPage = isLiepinDetailPage();
+  const blocked = detectLiepinBlockedPage(document, location);
+  if (!isDetailPage && !blocked) return;
+  const jobId = jobIdFromLocation();
+  if (!jobId) return;
+  const leaseId = await detailLeaseForCurrentPage();
+  if (!leaseId) return;
+  if (blocked) {
+    await reportDetailFailure(blocked, jobId, leaseId, liepinBlockedPageReason(blocked));
+    return;
+  }
+  if (!isDetailPage) {
+    await reportDetailFailure("unexpected_redirect", jobId, leaseId, "猎聘详情页跳转到无法识别的页面");
+    return;
+  }
   for (let attempt = 0; attempt < 30; attempt += 1) {
-    const blocked = detectLiepinBlockedPage();
-    if (blocked) {
-      await chrome.runtime.sendMessage({
-        type: "DETAIL_FAILED",
-        jobId: location.pathname.match(/\/(?:job|a)\/(\d+)\.shtml/i)?.[1] || "",
+    const currentBlocker = detectLiepinBlockedPage();
+    if (currentBlocker) {
+      await reportDetailFailure(
+        currentBlocker,
+        jobId,
         leaseId,
-        error: blocked === "risk_control" ? "猎聘详情页需要安全验证" : "猎聘详情页需要登录"
-      });
+        liepinBlockedPageReason(currentBlocker)
+      );
       return;
     }
     const job = extractLiepinDetail();
     if (job) {
-      const response: CommandResponse = await chrome.runtime.sendMessage({ type: "DETAIL_READY", job, leaseId });
-      if (!response.ok) {
-        await chrome.runtime.sendMessage({
-          type: "DETAIL_FAILED",
-          jobId: job.jobId,
+      const result = await sendRuntimeMessage<unknown>({ type: "DETAIL_READY", job, leaseId });
+      if (result.kind === "context_unavailable") return;
+      if (result.kind === "transport_error") {
+        reportUnexpectedError("详情数据上报失败", result.error);
+        return;
+      }
+      if (!isCommandResponse(result.value) || !result.value.ok) {
+        await reportDetailFailure(
+          "detail_rejected",
+          job.jobId,
           leaseId,
-          error: ("详情数据未被接受：" + (response.error || "后台校验失败")).slice(0, 500)
-        });
+          ("详情数据未被接受：" + (isCommandResponse(result.value) ? result.value.error || "后台校验失败" : "后台返回无效响应")).slice(0, 500)
+        );
       }
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
-  const jobId = location.pathname.match(/\/(?:job|a)\/(\d+)\.shtml/i)?.[1] || "";
-  await chrome.runtime.sendMessage({
-    type: "DETAIL_FAILED",
-    jobId,
-    leaseId,
-    error: "详情 DOM 未在 30 秒内准备好"
-  });
+  await reportDetailFailure("dom_timeout", jobId, leaseId, "详情 DOM 未在 30 秒内准备好");
 }
 
 async function mountConfiguredLauncher(): Promise<void> {
-  const response: CommandResponse & { data?: unknown } = await chrome.runtime.sendMessage({
+  const result = await sendRuntimeMessage<unknown>({
     type: "GET_LAUNCHER_VISIBILITY"
   });
+  if (result.kind === "context_unavailable") return;
+  if (result.kind === "transport_error") {
+    reportUnexpectedError("读取入口设置失败", result.error);
+    return;
+  }
+  if (!isCommandResponse(result.value)) {
+    reportUnexpectedError("读取入口设置失败", "扩展后台返回无效响应");
+    return;
+  }
+  const response = result.value;
   const visible = response.ok && response.data !== false;
   if (visible && (isLiepinListPage() || isLiepinDetailPage())) mountLauncher();
 }
 
-void mountConfiguredLauncher();
-void reportLeasedDetail();
+void mountConfiguredLauncher().catch((error) => reportUnexpectedError("挂载入口失败", error));
+void reportLeasedDetail().catch((error) => reportUnexpectedError("读取详情失败", error));

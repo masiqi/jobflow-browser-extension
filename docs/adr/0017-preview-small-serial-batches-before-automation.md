@@ -48,3 +48,15 @@ The reservation model is active for single-opportunity reviewed-send. A read-onl
 - Date: 2026-09-12
 
 Automatic submit-and-contact uses the same batch queue and delivery evidence model. Non-write outcomes continue to the next selected item. Pre-write blockers pause without consuming quota. Post-write ambiguity records component evidence, advances the item, pauses the batch, and does not automatically retry. Chrome startup and extension reload fail closed by pausing active automatic runs until the user explicitly resumes.
+
+Automatic batch authorization is audited before quota reservation as the exact tuple `delivery_confirmed / automatic_batch_authorized / {source: sidepanel_batch}`. Both the background producer and the database allowlist must be covered by one real RPC test; a mocked backend test does not establish this cross-layer compatibility. Failure at this event remains pre-write and is safely retryable.
+
+An automatic resume that already carries a same-batch draft revision and SHA-256 reopens the detail page only for fresh preflight. It does not persist detail fields again or downgrade the authoritative `draft_ready` projection. The server can repair the historical `extracting` drift only when a prior delivery record and the current draft/revision/hash all match exactly.
+
+## Amendment: conservative detail navigation pacing and risk handoff
+
+- Date: 2026-09-14
+
+Real-browser acceptance showed that write-only throttling still allowed several extension-owned detail navigations in a short burst, including a very short-lived terminal page, followed by a Liepin SMS risk challenge. The extension now keeps a separate owner/device Liepin navigation throttle: 15-30 seconds between navigation starts, persisted across batches and Reload, with model time counting toward the gap. A normal detail tab exists for at least 8 seconds before JobFlow closes it.
+
+This pacing reduces JobFlow's own burstiness but is not represented as anti-detection or a guarantee against risk controls. The extension does not spoof identity or behavior and does not bypass challenges. A validated Liepin intercept/SMS redirect pauses before write, remains open and active for the user, and requires explicit resume after the user resolves it.

@@ -2,6 +2,15 @@ import { z } from "zod";
 
 const platformSchema = z.literal("liepin");
 export const executionPolicySchema = z.enum(["draft_only", "reviewed_send", "automatic_send"]);
+export const detailFailureCodeSchema = z.enum([
+  "login_required",
+  "risk_control",
+  "job_unavailable",
+  "detail_rejected",
+  "dom_timeout",
+  "unexpected_redirect"
+]);
+export type DetailFailureCode = z.infer<typeof detailFailureCodeSchema>;
 
 export const listCandidateSchema = z.object({
   platform: platformSchema,
@@ -68,6 +77,7 @@ const batchItemSchema = z.object({
   status: z.enum([
     "queued", "opening", "extracting", "evaluating", "generating",
     "draft_ready", "delivery_ready", "waiting_interval", "delivery_preflighting",
+    "waiting_navigation",
     "delivery_in_progress", "delivery_succeeded", "delivery_partial", "blocked",
     "excluded", "review_required", "failed"
   ]),
@@ -104,6 +114,7 @@ export const batchRunSchema = z.object({
   deliverySucceededCount: z.number().int().nonnegative(),
   deliveryPartialCount: z.number().int().nonnegative(),
   pauseReason: z.string().max(200).optional(),
+  nextNavigationEligibleAt: z.string().optional(),
   nextWriteEligibleAt: z.string().optional()
 }).strict();
 
@@ -153,6 +164,14 @@ export const automaticWriteThrottleSchema = z.object({
   lastWriteStartedAt: z.string(),
   scheduledDelaySeconds: z.number().int().min(5).max(600),
   nextWriteEligibleAt: z.string()
+}).strict();
+
+export const liepinNavigationThrottleSchema = z.object({
+  ownerId: z.string().min(1).max(128),
+  platform: z.literal("liepin"),
+  lastNavigationStartedAt: z.string(),
+  scheduledDelaySeconds: z.number().int().min(10).max(600),
+  nextNavigationEligibleAt: z.string()
 }).strict();
 
 const reviewedSendIdentitySchema = z.object({
@@ -231,8 +250,15 @@ export const runtimeRequestSchema = z.discriminatedUnion("type", [
   }).strict(),
   z.object({ type: z.literal("SAVE_PROFILE"), profile: resumeProfileSchema }).strict(),
   z.object({ type: z.literal("ACTIVATE_PROFILE"), profileId: z.string().uuid() }).strict(),
+  z.object({ type: z.literal("DETAIL_PAGE_READY"), jobId: z.string().min(1).max(128) }).strict(),
   z.object({ type: z.literal("DETAIL_READY"), job: detailJobSchema, leaseId: z.string().uuid() }).strict(),
-  z.object({ type: z.literal("DETAIL_FAILED"), jobId: z.string().max(128), leaseId: z.string().uuid(), error: z.string().max(500) }).strict(),
+  z.object({
+    type: z.literal("DETAIL_FAILED"),
+    code: detailFailureCodeSchema,
+    jobId: z.string().max(128),
+    leaseId: z.string().uuid(),
+    error: z.string().max(500)
+  }).strict(),
   z.object({ type: z.literal("RETRY_STORED_OPPORTUNITY"), opportunityId: z.string().uuid() }).strict(),
   reviewedSendIdentitySchema.extend({ type: z.literal("PREPARE_REVIEWED_SEND") }).strict(),
   reviewedSendIdentitySchema.extend({ type: z.literal("CONFIRM_REVIEWED_SEND") }).strict(),

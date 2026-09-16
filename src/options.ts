@@ -7,6 +7,7 @@ import { escapeHtml, formatTime, sendCommand } from "./ui/command";
 import {
   DELIVERY_COMPONENT_LABELS,
   DELIVERY_OVERALL_LABELS,
+  deliveryDisplayReason,
   recordStatusLabel
 } from "./ui/delivery";
 import type {
@@ -73,6 +74,40 @@ const POLICY_STATUS: Record<ExtensionSettings["executionPolicy"], { title: strin
   draft_only: { title: "仅生成草稿", note: "当前禁止猎聘真实写入" },
   reviewed_send: { title: "逐条确认发送", note: "仅管理台可执行真实写入" },
   automatic_send: { title: "选中批次自动投递", note: "仅侧边栏一键按钮授权本批" }
+};
+
+const ACTION_BUSY_LABELS: Record<string, string> = {
+  login: "正在登录",
+  register: "正在注册",
+  logout: "正在退出",
+  "save-interface": "正在保存",
+  "delete-my-data": "正在删除",
+  "save-rules": "正在保存",
+  "save-model": "正在保存",
+  "test-model": "正在测试",
+  "clear-key": "正在删除",
+  "save-profile": "正在保存",
+  "activate-profile": "正在启用",
+  "delete-local-resume": "正在删除",
+  "save-draft": "正在保存",
+  regenerate: "正在重新生成",
+  "review-continue": "正在生成",
+  "review-exclude": "正在排除",
+  override: "正在生成",
+  "open-job": "正在打开"
+};
+
+const ACTION_SUCCESS_LABELS: Record<string, string> = {
+  "save-interface": "已保存",
+  "save-rules": "已保存",
+  "save-model": "已保存",
+  "save-profile": "已保存",
+  "review-continue": "草稿已生成，已转入人工确认",
+  "review-exclude": "职位已永久排除",
+  override: "例外草稿已生成，已转入人工确认",
+  regenerate: "草稿已重新生成",
+  "save-draft": "草稿已保存",
+  "open-job": "职位页已打开"
 };
 
 function navMarkup(): string {
@@ -291,6 +326,7 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
   const ruleEvidence = projectRuleEvidence(events);
   const draft = state.drafts.find((item) => item.opportunityId === record.id);
   const delivery = state.deliveries.find((item) => item.opportunityId === record.id);
+  const deliveryReason = deliveryDisplayReason(delivery);
   const canOverride = ["deterministic_excluded", "model_excluded", "user_excluded"].includes(record.status);
   const canRetryStored = record.status === "failed" && Boolean(record.description?.trim());
   const latestRevision = draft?.revisions
@@ -359,10 +395,10 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
         + escapeHtml(DELIVERY_COMPONENT_LABELS[delivery?.applicationStatus ?? "pending"] ?? "未知") + '</dd><dt>招呼</dt><dd>'
         + escapeHtml(DELIVERY_COMPONENT_LABELS[delivery?.greetingStatus ?? "pending"] ?? "未知") + '</dd><dt>整体</dt><dd>'
         + escapeHtml(DELIVERY_OVERALL_LABELS[delivery?.overallStatus ?? "ready"] ?? "未知") + '</dd></dl>'
-        + (delivery?.latestReason ? '<p class="reviewed-send-status">' + escapeHtml(delivery.latestReason) + "</p>" : "")
+        + (deliveryReason ? '<p class="reviewed-send-status">' + escapeHtml(deliveryReason) + "</p>" : "")
         + (draftOnlyLiveBlocked
           ? '<p class="write-warning">当前为仅生成模式，已隐藏真实投递和打招呼入口。</p>'
-          : '<p class="write-warning">确认后会对招聘网站执行真实写操作。请先打开对应猎聘职位详情页并确认账号状态。</p>')
+          : '<p class="write-warning">准备发送时会自动打开并检查对应猎聘职位页；最终确认后才会执行真实写操作。</p>')
         + '<div class="actions">'
         + (canPrepareReviewedSend && !reviewedPrepared
           ? '<button class="primary" data-action="prepare-reviewed-send" data-id="' + escapeHtml(record.id)
@@ -581,6 +617,13 @@ async function handleAction(action: string, target: HTMLElement, state: AppState
     await runReviewedSend(action === "confirm-reviewed-send", target.dataset.id || "", target.dataset.revisionId || "", state);
     return;
   }
+  if (!(target instanceof HTMLButtonElement) || target.dataset.busy === "true") return;
+  const originalLabel = target.textContent || "";
+  const originallyDisabled = target.disabled;
+  target.dataset.busy = "true";
+  target.setAttribute("aria-busy", "true");
+  target.disabled = true;
+  target.textContent = ACTION_BUSY_LABELS[action] || "处理中";
   try {
     if (action === "login" || action === "register") {
       await sendCommand({
@@ -642,9 +685,14 @@ async function handleAction(action: string, target: HTMLElement, state: AppState
       if (url) await chrome.tabs.create({ url, active: true });
     }
     await render();
-    showToast("已保存");
+    showToast(ACTION_SUCCESS_LABELS[action] || "操作已完成");
   } catch (error) {
     showToast(error instanceof Error ? error.message : String(error), true);
+  } finally {
+    target.dataset.busy = "false";
+    target.setAttribute("aria-busy", "false");
+    target.disabled = originallyDisabled;
+    target.textContent = originalLabel;
   }
 }
 
@@ -697,7 +745,16 @@ function updateReviewedSendFeedback(feedback: ReviewedSendFeedback, busy: boolea
   reviewedSendBusyOpportunityId = busy ? feedback.opportunityId : "";
   const panel = document.querySelector<HTMLElement>(".reviewed-send");
   const status = document.querySelector<HTMLElement>("#reviewedSendStatus");
+  const buttons = [...document.querySelectorAll<HTMLButtonElement>(
+    '.reviewed-send [data-action="prepare-reviewed-send"], .reviewed-send [data-action="confirm-reviewed-send"]'
+  )];
   panel?.setAttribute("aria-busy", String(busy));
+  for (const button of buttons) {
+    button.disabled = busy;
+    if (busy) {
+      button.textContent = button.dataset.action === "confirm-reviewed-send" ? "正在发送" : "正在检查";
+    }
+  }
   if (status) {
     status.textContent = feedback.message;
     status.className = "reviewed-send-status " + feedback.kind;
@@ -708,13 +765,13 @@ async function runReviewedSend(confirmSend: boolean, opportunityId: string, draf
   if (!opportunityId || !draftRevisionId || reviewedSendBusyOpportunityId) return;
   const draft = state.drafts.find((item) => item.opportunityId === opportunityId);
   if (!draft) throw new Error("草稿不存在");
-  const draftSha256 = await sourceHash(draft.currentText);
   updateReviewedSendFeedback({
     opportunityId,
     kind: "progress",
-    message: confirmSend ? "正在预留今日额度并执行一次真实发送" : "正在检查猎聘职位详情页和默认简历状态"
+    message: confirmSend ? "正在预留今日额度并执行一次真实发送" : "正在检查并自动打开猎聘职位详情页和默认简历状态"
   }, true);
   try {
+    const draftSha256 = await sourceHash(draft.currentText);
     await sendCommand({
       type: confirmSend ? "CONFIRM_REVIEWED_SEND" : "PREPARE_REVIEWED_SEND",
       opportunityId,

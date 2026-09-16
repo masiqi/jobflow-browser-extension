@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { detailJobSchema } from "../src/domain/messages";
 import {
   detectLiepinBlockedPage,
@@ -65,6 +65,34 @@ describe("Liepin list extraction", () => {
     expect(detectLiepinBlockedPage()).toBe("login_required");
     document.body.innerHTML = "<main>访问异常，请完成安全验证并拖动滑块</main>";
     expect(detectLiepinBlockedPage()).toBe("risk_control");
+    document.body.innerHTML = "<main>当前访问需要完成验证</main>";
+    expect(detectLiepinBlockedPage(document, {
+      hostname: "safe.liepin.com",
+      pathname: "/v/intercept/verifysms"
+    } as Location)).toBe("risk_control");
+    document.title = "安全中心-风险提示";
+    document.body.innerHTML = "<main>当前访问需要完成验证</main>";
+    expect(detectLiepinBlockedPage(document, {
+      hostname: "www.liepin.com",
+      pathname: "/a/1980000999.shtml"
+    } as Location)).toBe("risk_control");
+    document.title = "";
+  });
+
+  it("classifies a paused recruitment page as permanently unavailable", () => {
+    document.body.innerHTML = `
+      <main>
+        <header class="stop-apply-header">该职位已暂停招聘</header>
+        <section class="recommendations">投递过该职位的人还浏览了其他合成职位</section>
+      </main>`;
+
+    expect(detectLiepinBlockedPage()).toBe("job_unavailable");
+    expect(extractLiepinDetail(document, "https://www.liepin.com/job/1980000999.shtml")).toBeNull();
+    expect(preflightLiepinReviewedSend(
+      document,
+      "https://www.liepin.com/job/1980000999.shtml",
+      "1980000999"
+    )).toMatchObject({ ok: false, blocker: "job_unavailable", reason: "猎聘职位已暂停招聘或不可用" });
   });
 
   it("preflights exactly one primary reviewed-send action without interacting", () => {
@@ -80,6 +108,25 @@ describe("Liepin list extraction", () => {
     expect(preflightLiepinReviewedSend(document, "https://www.liepin.com/a/1980000301.shtml", "1980000301"))
       .toMatchObject({ ok: true, actionTier: "primary", resumeMode: "platform_default" });
     expect(clicked).toBe(0);
+  });
+
+  it("binds a full Liepin URL job ID to its verified eight-digit action suffix", () => {
+    document.body.innerHTML = `
+      <main>
+        <a class="btn-main" data-selector="chat-chat" data-jobid="80000301">聊一聊</a>
+        <button class="ant-btn" data-selector="chat-chat" data-jobid="89999999">聊一聊</button>
+      </main>`;
+
+    expect(preflightLiepinReviewedSend(
+      document,
+      "https://www.liepin.com/job/1980000301.shtml",
+      "1980000301"
+    )).toMatchObject({ ok: true, actionTier: "primary" });
+    expect(preflightLiepinReviewedSend(
+      document,
+      "https://www.liepin.com/job/1980000302.shtml",
+      "1980000302"
+    )).toMatchObject({ ok: false, blocker: "missing_action" });
   });
 
   it("fails closed for ambiguous selected-tier actions and resume pickers", () => {
@@ -200,25 +247,429 @@ describe("Liepin list extraction", () => {
     expect(chatSendClicks).toBe(1);
   });
 
-  it("does not count a conversation-only state as formal application evidence", async () => {
+  it("uses the current Liepin IM composer and send-control classes", async () => {
+    vi.useFakeTimers();
+    try {
+      const draft = "您好，这是一条发送到猎聘专属 IM 编辑器的合成招呼语。";
+      document.body.innerHTML = `
+        <input id="page-search" type="text">
+        <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+        <section id="chat-host"></section>`;
+      let sendClicks = 0;
+      document.querySelector(".btn-main")?.addEventListener("click", () => {
+        document.querySelector("#chat-host")!.innerHTML = `
+          <section class="im-ui-chat-input">
+            <div data-jobid="1980000301">简历已发送 1980000301</div>
+            <input class="emoji-search" type="text">
+            <textarea class="im-ui-textarea"></textarea>
+            <div class="im-ui-basic-send-btn">发送</div>
+            <div class="messages"></div>
+          </section>`;
+        document.querySelector(".im-ui-basic-send-btn")?.addEventListener("click", () => {
+          sendClicks += 1;
+          const bubble = document.createElement("div");
+          bubble.className = "message-self";
+          bubble.textContent = (document.querySelector(".im-ui-textarea") as HTMLTextAreaElement).value;
+          document.querySelector(".messages")?.append(bubble);
+        });
+      });
+
+      const execution = executeLiepinReviewedSend(
+        document,
+        "https://www.liepin.com/a/1980000301.shtml",
+        "1980000301",
+        draft
+      );
+      await vi.advanceTimersByTimeAsync(5_000);
+      const result = await execution;
+
+      expect(result).toMatchObject({ ok: true, application: "verified", greeting: "verified" });
+      expect((document.querySelector("#page-search") as HTMLInputElement).value).toBe("");
+      expect((document.querySelector(".emoji-search") as HTMLInputElement).value).toBe("");
+      expect(sendClicks).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("finds a Liepin IM surface mounted in an open shadow root", async () => {
+    vi.useFakeTimers();
+    try {
+      const draft = "您好，这是一条发送到 Shadow DOM 聊天编辑器的合成招呼语。";
+      document.body.innerHTML = `
+        <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+        <div id="im-host"></div>`;
+      let sendClicks = 0;
+      document.querySelector(".btn-main")?.addEventListener("click", () => {
+        const shadow = document.querySelector("#im-host")!.attachShadow({ mode: "open" });
+        shadow.innerHTML = `
+          <section class="im-ui-chat-input">
+            <div data-jobid="1980000301">简历已发送 1980000301</div>
+            <textarea class="im-ui-textarea"></textarea>
+            <button class="im-ui-basic-send-btn">发送</button>
+            <div class="messages"></div>
+          </section>`;
+        shadow.querySelector(".im-ui-basic-send-btn")?.addEventListener("click", () => {
+          sendClicks += 1;
+          const bubble = shadow.ownerDocument.createElement("div");
+          bubble.className = "message-self";
+          bubble.textContent = (shadow.querySelector(".im-ui-textarea") as HTMLTextAreaElement).value;
+          shadow.querySelector(".messages")?.append(bubble);
+        });
+      });
+
+      const execution = executeLiepinReviewedSend(
+        document,
+        "https://www.liepin.com/a/1980000301.shtml",
+        "1980000301",
+        draft
+      );
+      await vi.advanceTimersByTimeAsync(16_000);
+      const result = await execution;
+
+      expect(result).toMatchObject({ ok: true, application: "verified", greeting: "verified" });
+      expect(sendClicks).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("finds a same-origin Liepin IM surface mounted in an iframe", async () => {
+    vi.useFakeTimers();
+    try {
+      const draft = "您好，这是一条发送到同源 iframe 聊天编辑器的合成招呼语。";
+      document.body.innerHTML = `
+        <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+        <iframe id="im-frame"></iframe>`;
+      const frame = document.querySelector("#im-frame") as HTMLIFrameElement;
+      const frameDocument = frame.contentDocument!;
+      let sendClicks = 0;
+      document.querySelector(".btn-main")?.addEventListener("click", () => {
+        frameDocument.body.innerHTML = `
+          <section class="im-ui-chat-input">
+            <div data-jobid="1980000301">简历已发送 1980000301</div>
+            <textarea class="im-ui-textarea"></textarea>
+            <button class="im-ui-basic-send-btn">发送</button>
+            <div class="messages"></div>
+          </section>`;
+        frameDocument.querySelector(".im-ui-basic-send-btn")?.addEventListener("click", () => {
+          sendClicks += 1;
+          const bubble = frameDocument.createElement("div");
+          bubble.className = "message-self";
+          bubble.textContent = (frameDocument.querySelector(".im-ui-textarea") as HTMLTextAreaElement).value;
+          frameDocument.querySelector(".messages")?.append(bubble);
+        });
+      });
+
+      const execution = executeLiepinReviewedSend(
+        document,
+        "https://www.liepin.com/a/1980000301.shtml",
+        "1980000301",
+        draft
+      );
+      await vi.advanceTimersByTimeAsync(16_000);
+      const result = await execution;
+
+      expect(result).toMatchObject({ ok: true, application: "verified", greeting: "verified" });
+      expect(sendClicks).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("finds a visible chat surface while its send button is disabled", async () => {
+    vi.useFakeTimers();
+    try {
+      const draft = "您好，这是一条发送到暂时禁用发送按钮的合成聊天编辑器的招呼语。";
+      document.body.innerHTML = `
+        <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+        <section id="chat-host"></section>`;
+      let sendClicks = 0;
+      document.querySelector(".btn-main")?.addEventListener("click", () => {
+        document.querySelector("#chat-host")!.innerHTML = `
+          <section class="im-ui-chat-input">
+            <div data-jobid="1980000301">简历已发送 1980000301</div>
+            <textarea class="im-ui-textarea"></textarea>
+            <button class="im-ui-basic-send-btn" disabled style="pointer-events: none">发送</button>
+            <div class="messages"></div>
+          </section>`;
+        document.querySelector(".im-ui-textarea")?.addEventListener("input", () => {
+          const send = document.querySelector(".im-ui-basic-send-btn") as HTMLButtonElement;
+          send.disabled = false;
+          send.style.pointerEvents = "auto";
+        });
+        document.querySelector(".im-ui-basic-send-btn")?.addEventListener("click", () => {
+          sendClicks += 1;
+          const bubble = document.createElement("div");
+          bubble.className = "message-self";
+          bubble.textContent = (document.querySelector(".im-ui-textarea") as HTMLTextAreaElement).value;
+          document.querySelector(".messages")?.append(bubble);
+        });
+      });
+
+      const execution = executeLiepinReviewedSend(
+        document,
+        "https://www.liepin.com/a/1980000301.shtml",
+        "1980000301",
+        draft
+      );
+      await vi.advanceTimersByTimeAsync(16_000);
+      const result = await execution;
+
+      expect(result).toMatchObject({ ok: true, application: "verified", greeting: "verified" });
+      expect(sendClicks).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("verifies an outbound greeting rendered beside the chat input", async () => {
+    const draft = "您好，这是一条渲染在消息列表中的合成招呼语。";
+    let sendClicks = 0;
     document.body.innerHTML = `
       <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
-      <section id="state"></section>`;
+      <section id="chat-host"></section>`;
     document.querySelector(".btn-main")?.addEventListener("click", () => {
-      document.querySelector("#state")!.innerHTML = '<div data-jobid="1980000301">已沟通 1980000301</div>';
+      document.querySelector("#chat-host")!.innerHTML = `
+        <section class="im-ui-chat-container">
+          <div class="im-ui-message-list-wrapper"><div class="messages"></div></div>
+          <section class="im-ui-chat-input">
+            <div data-jobid="1980000301">简历已发送 1980000301</div>
+            <textarea class="im-ui-textarea"></textarea>
+            <button class="im-ui-basic-send-btn">发送</button>
+          </section>
+        </section>`;
+      document.querySelector(".im-ui-basic-send-btn")?.addEventListener("click", () => {
+        sendClicks += 1;
+        const bubble = document.createElement("div");
+        bubble.className = "message-self";
+        bubble.textContent = (document.querySelector(".im-ui-textarea") as HTMLTextAreaElement).value;
+        document.querySelector(".messages")?.append(bubble);
+      });
     });
 
     const result = await executeLiepinReviewedSend(
       document,
       "https://www.liepin.com/a/1980000301.shtml",
       "1980000301",
-      "合成招呼语",
-      true,
-      false
+      draft
     );
 
-    expect(result.application).toBe("attempted");
-    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({ ok: true, application: "verified", greeting: "verified" });
+    expect(result.evidenceCodes).toContain("outbound_greeting_exact_match");
+    expect(sendClicks).toBe(1);
+  });
+
+  it("waits for a delayed outbound message and joins split text nodes", async () => {
+    vi.useFakeTimers();
+    try {
+      const draft = "您好，这是一条在异步消息列表中分段渲染的合成招呼语。";
+      let sendClicks = 0;
+      document.body.innerHTML = `
+        <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+        <section id="chat-host"></section>`;
+      document.querySelector(".btn-main")?.addEventListener("click", () => {
+        document.querySelector("#chat-host")!.innerHTML = `
+          <section class="im-ui-chat-container">
+            <div data-jobid="1980000301">简历已发送 1980000301</div>
+            <div class="im-ui-message-list-wrapper"><div class="messages"></div></div>
+            <section class="im-ui-chat-input">
+              <textarea class="im-ui-textarea"></textarea>
+              <button class="im-ui-basic-send-btn">发送</button>
+            </section>
+          </section>`;
+        document.querySelector(".im-ui-basic-send-btn")?.addEventListener("click", () => {
+          sendClicks += 1;
+          setTimeout(() => {
+            const bubble = document.createElement("div");
+            bubble.className = "im-ui-txt im-ui-send";
+            bubble.innerHTML = `<span>您好，这是一条在异步消息列表中分段渲染的</span><span>合成招呼语。</span>`;
+            document.querySelector(".messages")?.append(bubble);
+          }, 6_000);
+        });
+      });
+
+      const execution = executeLiepinReviewedSend(
+        document,
+        "https://www.liepin.com/a/1980000301.shtml",
+        "1980000301",
+        draft
+      );
+      await vi.advanceTimersByTimeAsync(16_000);
+      const result = await execution;
+
+      expect(result).toMatchObject({ ok: true, application: "verified", greeting: "verified" });
+      expect(result.evidenceCodes).toContain("outbound_greeting_exact_match");
+      expect(sendClicks).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recognizes an existing exact outbound greeting without sending it again", async () => {
+    const draft = "您好，这是一条已经存在于当前会话中的合成招呼语。";
+    let sendClicks = 0;
+    document.body.innerHTML = `
+      <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">继续聊</a>
+      <section class="im-ui-chat-container">
+        <div data-jobid="1980000301">简历已发送 1980000301</div>
+        <div class="im-ui-message-list-wrapper">
+          <div class="messages"><div data-direction="outgoing"><span>${draft}</span></div></div>
+        </div>
+        <section class="im-ui-chat-input">
+          <textarea class="im-ui-textarea"></textarea>
+          <button class="im-ui-basic-send-btn">发送</button>
+        </section>
+      </section>`;
+    document.querySelector(".im-ui-basic-send-btn")?.addEventListener("click", () => { sendClicks += 1; });
+
+    const result = await executeLiepinReviewedSend(
+      document,
+      "https://www.liepin.com/a/1980000301.shtml",
+      "1980000301",
+      draft
+    );
+
+    expect(result).toMatchObject({ ok: true, application: "verified", greeting: "verified" });
+    expect(result.evidenceCodes).toContain("outbound_greeting_exact_match");
+    expect(sendClicks).toBe(0);
+    expect((document.querySelector(".im-ui-textarea") as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("does not treat an inbound message with the same text as outbound evidence", async () => {
+    vi.useFakeTimers();
+    try {
+      const draft = "您好，这是一条由招聘方发来的同文消息，不能作为我的发送证据。";
+      let sendClicks = 0;
+      document.body.innerHTML = `
+        <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">继续聊</a>
+        <section class="im-ui-chat-container">
+          <div data-jobid="1980000301">简历已发送 1980000301</div>
+          <div class="im-ui-message-list-wrapper">
+            <div class="messages"><div data-direction="incoming"><span>${draft}</span></div></div>
+          </div>
+          <section class="im-ui-chat-input">
+            <textarea class="im-ui-textarea"></textarea>
+            <button class="im-ui-basic-send-btn">发送</button>
+          </section>
+        </section>`;
+      document.querySelector(".im-ui-basic-send-btn")?.addEventListener("click", () => { sendClicks += 1; });
+
+      const execution = executeLiepinReviewedSend(
+        document,
+        "https://www.liepin.com/a/1980000301.shtml",
+        "1980000301",
+        draft
+      );
+      await vi.advanceTimersByTimeAsync(16_000);
+      const result = await execution;
+
+      expect(result.greeting).toBe("attempted");
+      expect(result.ok).toBe(false);
+      expect(sendClicks).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for the remote Liepin IM surface to load for longer than four seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      const draft = "您好，这是一条等待远程聊天组件加载后发送的合成招呼语。";
+      document.body.innerHTML = `
+        <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+        <section id="chat-host"></section>`;
+      document.querySelector(".btn-main")?.addEventListener("click", () => {
+        setTimeout(() => {
+          document.querySelector("#chat-host")!.innerHTML = `
+            <section class="chat-panel">
+              <div data-jobid="1980000301">简历已发送 1980000301</div>
+              <textarea class="chat-composer"></textarea>
+              <button class="chat-send">发送</button>
+              <div class="messages"></div>
+            </section>`;
+          document.querySelector(".chat-send")?.addEventListener("click", () => {
+            const bubble = document.createElement("div");
+            bubble.className = "message-self";
+            bubble.textContent = (document.querySelector(".chat-composer") as HTMLTextAreaElement).value;
+            document.querySelector(".messages")?.append(bubble);
+          });
+        }, 5_000);
+      });
+
+      const execution = executeLiepinReviewedSend(
+        document,
+        "https://www.liepin.com/a/1980000301.shtml",
+        "1980000301",
+        draft
+      );
+      await vi.advanceTimersByTimeAsync(16_000);
+
+      await expect(execution).resolves.toMatchObject({ ok: true, application: "verified", greeting: "verified" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not reuse a chat surface hidden by an ancestor before the action opens it", async () => {
+    const draft = "您好，这是一条只发送到已经打开的可见会话中的合成招呼语。";
+    let actionClicks = 0;
+    document.body.innerHTML = `
+      <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+      <section class="chat-panel" style="display: none">
+        <div data-jobid="1980000301">简历已发送 1980000301</div>
+        <textarea class="chat-composer"></textarea>
+        <button class="chat-send">发送</button>
+        <div class="messages"></div>
+      </section>`;
+    document.querySelector(".btn-main")?.addEventListener("click", () => {
+      actionClicks += 1;
+      (document.querySelector(".chat-panel") as HTMLElement).style.display = "block";
+    });
+    document.querySelector(".chat-send")?.addEventListener("click", () => {
+      const bubble = document.createElement("div");
+      bubble.className = "message-self";
+      bubble.textContent = (document.querySelector(".chat-composer") as HTMLTextAreaElement).value;
+      document.querySelector(".messages")?.append(bubble);
+    });
+
+    const result = await executeLiepinReviewedSend(
+      document,
+      "https://www.liepin.com/a/1980000301.shtml",
+      "1980000301",
+      draft
+    );
+
+    expect(result).toMatchObject({ ok: true, application: "verified", greeting: "verified" });
+    expect(actionClicks).toBe(1);
+  });
+
+  it("does not count a conversation-only state as formal application evidence", async () => {
+    vi.useFakeTimers();
+    try {
+      document.body.innerHTML = `
+        <a class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</a>
+        <section id="state"></section>`;
+      document.querySelector(".btn-main")?.addEventListener("click", () => {
+        document.querySelector("#state")!.innerHTML = '<div data-jobid="1980000301">已沟通 1980000301</div>';
+      });
+
+      const execution = executeLiepinReviewedSend(
+        document,
+        "https://www.liepin.com/a/1980000301.shtml",
+        "1980000301",
+        "合成招呼语",
+        true,
+        false
+      );
+      await vi.advanceTimersByTimeAsync(16_000);
+      const result = await execution;
+
+      expect(result.application).toBe("attempted");
+      expect(result.ok).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stops after the native action when resume selection becomes ambiguous", async () => {

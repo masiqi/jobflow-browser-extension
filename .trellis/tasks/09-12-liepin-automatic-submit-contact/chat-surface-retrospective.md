@@ -36,10 +36,13 @@ The next live report was `greeting_attempted / outbound_greeting_unverified` eve
 
 The follow-up fix now waits 15 seconds for greeting evidence, recognizes the platform-owned outbound class and direction markers, joins text split across nested spans, and checks for an exact outbound message already present before filling or clicking. An inbound message with identical text remains a negative case. The adapter continues to fail closed when the only confirmation exists outside the current desktop DOM (for example, the mobile app); that case remains attempted/needs-review and is never silently promoted to verified.
 
+A related presentation bug surfaced after the adapter began returning independent component results: when greeting verification succeeded but application verification did not, the final `latestReason` was the greeting success message, so the batch appeared to pause “because greeting was verified.” The partial reason is now derived from both component statuses and is reused by automatic batch state plus record-center views. This keeps the required pause while naming the missing application evidence and prevents an event-ordering detail from obscuring recovery work.
+
 ### 5. Knowledge Capture
 
 - [x] Updated the cross-layer contract with the observed IM namespace, timeout, visibility, validation cases, and required assertions.
 - [x] Added focused adapter regression tests, including delayed message insertion, split text, actual `im-ui-txt.im-ui-send`, pre-existing exact messages, and inbound same-text rejection.
+- [x] Added a partial-delivery regression proving a verified greeting does not mask missing application evidence in batch and record-center reasons.
 - [x] Confirmed this application repository has no `src/templates/markdown/spec/` mirror to synchronize.
 - [ ] Complete a new 1-item live acceptance; the failed `79824963` attempt remains post-write and must not be automatically replayed.
 

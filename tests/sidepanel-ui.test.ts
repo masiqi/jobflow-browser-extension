@@ -318,6 +318,34 @@ describe("side-panel scan interaction", () => {
     }
   });
 
+  it("shows a persisted detail-navigation countdown separately from write pacing", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-12T00:00:00.000Z"));
+    const scanPreview = preview(1);
+    const state = appState(scanPreview);
+    state.run = {
+      ...batchRun(scanPreview, [scanPreview.candidates[0]!.jobId]),
+      executionPolicy: "automatic_send",
+      nextNavigationEligibleAt: "2026-09-12T00:00:03.000Z",
+      items: [{
+        candidate: scanPreview.candidates[0]!,
+        status: "waiting_navigation",
+        attempt: 0
+      }]
+    };
+    const sendMessage = vi.fn(async () => ({ ok: true, data: state }));
+    try {
+      await openSidePanel(sendMessage);
+      expect(document.querySelector(".run-wait")?.textContent).toContain("下一次职位详情访问");
+      expect(document.querySelector(".run-wait")?.textContent).toContain("3 秒");
+
+      vi.advanceTimersByTime(1100);
+      expect(document.querySelector(".run-wait")?.textContent).toContain("2 秒");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("restores the start control after a batch-start failure", async () => {
     const scanPreview = preview(1);
     const state = appState(scanPreview);
@@ -374,5 +402,32 @@ describe("side-panel scan interaction", () => {
     expect(document.querySelector(".record")?.textContent).toContain("已投递并联系");
     expect(document.querySelector(".record-reason")?.textContent).toContain("正式投递已从猎聘页面验证");
     expect(document.querySelector(".record-reason")?.textContent).not.toContain("草稿已生成");
+  });
+
+  it("explains which component is missing when a delivery is partial", async () => {
+    const scanPreview = preview(1);
+    const opportunity = failedOpportunity(scanPreview, "草稿已生成");
+    opportunity.status = "draft_ready";
+    const state = appState(scanPreview);
+    state.opportunities = [opportunity];
+    state.deliveries = [{
+      opportunityId: opportunity.id,
+      platform: "liepin",
+      platformJobId: opportunity.platformJobId,
+      resumeMode: "platform_default",
+      overallStatus: "partial",
+      applicationStatus: "attempted",
+      greetingStatus: "verified",
+      latestReason: "招呼语已从猎聘页面验证",
+      updatedAt: "2026-09-11T00:00:02.000Z"
+    }];
+    const sendMessage = vi.fn(async () => ({ ok: true, data: state }));
+    await openSidePanel(sendMessage);
+
+    expect(document.querySelector(".record")?.textContent).toContain("投递部分完成");
+    expect(document.querySelector(".record-reason")?.textContent).toContain(
+      "正式投递已尝试，尚未取得独立平台证据"
+    );
+    expect(document.querySelector(".record-reason")?.textContent).toContain("招呼语已从猎聘页面验证");
   });
 });

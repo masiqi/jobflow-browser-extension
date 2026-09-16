@@ -26,7 +26,12 @@ import {
   updateDraftProfile,
   upsertCandidates
 } from "./backend/supabase";
-import { DEFAULT_SETTINGS } from "./defaults";
+import {
+  DEFAULT_SETTINGS,
+  LIEPIN_DETAIL_NAVIGATION_DELAY_MAX_SECONDS,
+  LIEPIN_DETAIL_NAVIGATION_DELAY_MIN_SECONDS,
+  LIEPIN_DETAIL_MIN_DWELL_SECONDS
+} from "./defaults";
 import {
   completeCurrentItem,
   completeDeliveryPartialAndPause,
@@ -37,7 +42,14 @@ import {
   secureRandomIntegerInRange,
   startDeliveryWait
 } from "./domain/batch";
-import { detailJobSchema, decodeRuntimeRequest, listCandidateSchema, type RuntimeRequest } from "./domain/messages";
+import { deliveryPartialReason } from "./domain/delivery";
+import {
+  detailJobSchema,
+  decodeRuntimeRequest,
+  listCandidateSchema,
+  type DetailFailureCode,
+  type RuntimeRequest
+} from "./domain/messages";
 import { evaluateRules, jobKey } from "./filters";
 import { normalizeChatCompletionsEndpoint } from "./llm";
 import { deleteUserResumes, getResumeMetadata } from "./local/resume-store";
@@ -51,13 +63,16 @@ import {
   clearDeviceOwner,
   clearLegacyData,
   clearAutomaticWriteThrottle,
+  clearLiepinNavigationThrottle,
   getAutomaticWriteThrottle,
   getByokKey,
+  getLiepinNavigationThrottle,
   getRun,
   getScanPreview,
   ensureDeviceOwner,
   loadSettings,
   saveAutomaticWriteThrottle,
+  saveLiepinNavigationThrottle,
   saveRun,
   saveScanPreview,
   saveSettings,
@@ -70,6 +85,7 @@ import type {
   DeliveryRecord,
   DetailJob,
   ExtensionSettings,
+  LiepinNavigationThrottle,
   ListCandidate,
   OpportunityRecord,
   ResumeProfile,
@@ -80,6 +96,8 @@ const QUEUE_ALARM = "jobflow:queue";
 const DETAIL_ALARM_PREFIX = "jobflow:detail:";
 const AUTO_WRITE_ALARM_PREFIX = "jobflow:auto-write:";
 const REVIEWED_SEND_LEASE_TTL_MS = 5 * 60 * 1000;
+const REVIEWED_SEND_CONTENT_READY_TIMEOUT_MS = 15_000;
+const REVIEWED_SEND_CONTENT_RETRY_INTERVAL_MS = 250;
 const DELIVERY_CONTENT_TIMEOUT_MS = 120_000;
 
 type PostDetailStage = "evaluating" | "generating";
@@ -98,10 +116,12 @@ interface ReviewedSendLease {
   draftRevisionId: string;
   draftSha256: string;
   preparedAt: number;
+  openedByExtension: boolean;
 }
 
 const reviewedSendLeases = new Map<string, ReviewedSendLease>();
 const reviewedSendExecuting = new Set<string>();
+const userGenerationInFlight = new Set<string>();
 let liepinLiveWriteLockOwner: string | null = null;
 
 function now(): string {
@@ -291,6 +311,29 @@ function isTrustedSidePanelSender(sender: chrome.runtime.MessageSender): boolean
   return isTrustedExtensionPageSender(sender, "sidepanel.html");
 }
 
+function jobIdFromTrustedLiepinPageUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    const isLiepinHost = url.hostname === "liepin.com" || url.hostname.endsWith(".liepin.com");
+    if (url.protocol !== "https:" || !isLiepinHost) return "";
+    const direct = url.pathname.match(/^\/(?:job|a)\/(\d+)\.shtml$/i)?.[1] || "";
+    if (direct) return direct;
+    const backUrl = url.searchParams.get("backurl");
+    if (!backUrl) return "";
+    const original = new URL(backUrl);
+    const originalIsLiepin = original.hostname === "liepin.com" || original.hostname.endsWith(".liepin.com");
+    if (original.protocol !== "https:" || !originalIsLiepin) return "";
+    return original.pathname.match(/^\/(?:job|a)\/(\d+)\.shtml$/i)?.[1] || "";
+  } catch {
+    return "";
+  }
+}
+
+function isTrustedLiepinContentSender(sender: chrome.runtime.MessageSender, jobId: string): boolean {
+  if (sender.id !== chrome.runtime.id || typeof sender.tab?.id !== "number" || !sender.url) return false;
+  return jobIdFromTrustedLiepinPageUrl(sender.url) === jobId;
+}
+
 async function startBatch(
   sender: chrome.runtime.MessageSender,
   selectedJobIds: string[],
@@ -360,10 +403,58 @@ async function persistNextAutomaticWriteThrottle(
   });
 }
 
+async function waitForLiepinNavigationSlot(run: BatchRun, item: BatchItem): Promise<boolean> {
+  const auth = await getAuthProjection();
+  if (auth.status !== "signed_in" || !auth.userId) {
+    await finishItem(run, item, "failed", "JobFlow 登录状态无效");
+    return false;
+  }
+  const throttle = await getLiepinNavigationThrottle(auth.userId, "liepin");
+  if (throttle) {
+    const waitUntil = new Date(throttle.nextNavigationEligibleAt).getTime();
+    if (Number.isFinite(waitUntil) && waitUntil > Date.now()) {
+      item.status = "waiting_navigation";
+      run.nextNavigationEligibleAt = throttle.nextNavigationEligibleAt;
+      await saveRun(run);
+      await chrome.alarms.create(QUEUE_ALARM, { when: waitUntil });
+      await notifyState();
+      return false;
+    }
+    await clearLiepinNavigationThrottle();
+  }
+
+  const lastNavigationStartedAt = now();
+  const scheduledDelaySeconds = secureRandomIntegerInRange(
+    LIEPIN_DETAIL_NAVIGATION_DELAY_MIN_SECONDS,
+    LIEPIN_DETAIL_NAVIGATION_DELAY_MAX_SECONDS
+  );
+  const nextThrottle: LiepinNavigationThrottle = {
+    ownerId: auth.userId,
+    platform: "liepin",
+    lastNavigationStartedAt,
+    scheduledDelaySeconds,
+    nextNavigationEligibleAt: new Date(
+      new Date(lastNavigationStartedAt).getTime() + scheduledDelaySeconds * 1000
+    ).toISOString()
+  };
+  await saveLiepinNavigationThrottle(nextThrottle);
+  run.nextNavigationEligibleAt = undefined;
+  item.status = "opening";
+  return true;
+}
+
 async function closeItemTab(item: BatchItem): Promise<void> {
   if (typeof item.tabId === "number") await chrome.tabs.remove(item.tabId).catch(() => undefined);
   item.tabId = undefined;
   item.leaseId = undefined;
+}
+
+async function waitForMinimumDetailDwell(item: BatchItem): Promise<void> {
+  if (typeof item.tabId !== "number" || !item.startedAt) return;
+  const startedAt = new Date(item.startedAt).getTime();
+  if (!Number.isFinite(startedAt)) return;
+  const remainingMs = startedAt + LIEPIN_DETAIL_MIN_DWELL_SECONDS * 1000 - Date.now();
+  if (remainingMs > 0) await new Promise((resolve) => setTimeout(resolve, remainingMs));
 }
 
 async function acquireLiepinLiveWriteLock(owner: string): Promise<() => void> {
@@ -405,7 +496,8 @@ async function openCurrentItemTab(run: BatchRun, item: BatchItem): Promise<boole
 async function pauseAutomaticRunBeforeWrite(
   run: BatchRun,
   blockerCode: string,
-  reason: string
+  reason: string,
+  preserveTabForUser = false
 ): Promise<void> {
   if (run.status !== "running") {
     run.status = "paused";
@@ -415,7 +507,14 @@ async function pauseAutomaticRunBeforeWrite(
     return;
   }
   const item = run.items[run.currentIndex];
-  if (item) await closeItemTab(item);
+  if (item && preserveTabForUser) {
+    if (item.leaseId) await chrome.alarms.clear(detailAlarmName(run.id, item.leaseId));
+    if (typeof item.tabId === "number") await chrome.tabs.update(item.tabId, { active: true }).catch(() => undefined);
+    item.tabId = undefined;
+    item.leaseId = undefined;
+  } else if (item) {
+    await closeItemTab(item);
+  }
   await saveRun(pauseCurrentItemBeforeWrite(run, blockerCode, reason, now()));
   await notifyState();
 }
@@ -433,11 +532,13 @@ async function reopenAutomaticItemForFreshDetail(run: BatchRun, item: BatchItem)
   await closeItemTab(item);
   clearItemBlocker(item);
   run.pauseReason = undefined;
+  run.nextNavigationEligibleAt = undefined;
   run.nextWriteEligibleAt = undefined;
   run.status = "running";
-  item.status = "opening";
-  if (!(await openCurrentItemTab(run, item))) return;
-  await saveOpeningRunAndDetailAlarm(run, item);
+  item.status = "queued";
+  await saveRun(run);
+  await scheduleQueue(100);
+  await notifyState();
 }
 
 async function assertAutomaticRunStillWritable(runId: string, jobId: string): Promise<BatchRun> {
@@ -484,7 +585,9 @@ async function persistProcessingFailure(
   error: unknown,
   settings?: ExtensionSettings
 ): Promise<void> {
-  const errorCode = (error instanceof Error ? error.message : "处理失败").slice(0, 200);
+  const errorCode = (typeof error === "string"
+    ? error
+    : error instanceof Error ? error.message : "处理失败").slice(0, 200);
   try {
     await invokeModel("record_failure", {
       opportunityId,
@@ -503,6 +606,7 @@ async function finishItem(
 ): Promise<void> {
   const leaseId = item.leaseId;
   if (leaseId) await chrome.alarms.clear(detailAlarmName(run.id, leaseId));
+  await waitForMinimumDetailDwell(item);
   await closeItemTab(item);
   if (status === "failed" && error) {
     const record = (await listOpportunities().catch(() => []))
@@ -536,14 +640,19 @@ async function processNext(): Promise<void> {
   if (item.status === "delivery_ready" || item.status === "waiting_interval") {
     return processAutomaticDelivery(run, item);
   }
-  if (item.status !== "queued") return;
+  if (item.status !== "queued" && item.status !== "waiting_navigation") return;
   const records = await listOpportunities();
   const record = records.find((candidate) =>
     candidate.platform === item.candidate.platform
     && candidate.platformJobId === item.candidate.jobId
   );
   if (!record) return finishItem(run, item, "failed", "职位记录不存在");
-  if (isAutomaticallyTerminal(record.status)) {
+  const hasAutomaticDraftIdentity = run.executionPolicy === "automatic_send"
+    && Boolean(item.opportunityId && item.draftRevisionId && item.draftSha256);
+  const needsFreshAutomaticProcessing = run.executionPolicy === "automatic_send"
+    && item.opportunityId === record.id
+    && !hasAutomaticDraftIdentity;
+  if (isAutomaticallyTerminal(record.status) && !hasAutomaticDraftIdentity && !needsFreshAutomaticProcessing) {
     const status = record.status === "review_required"
       ? "review_required"
       : record.status === "draft_ready"
@@ -551,7 +660,7 @@ async function processNext(): Promise<void> {
         : "excluded";
     return finishItem(run, item, status, "已存在持久处理记录");
   }
-  item.status = "opening";
+  if (!(await waitForLiepinNavigationSlot(run, item))) return;
   if (!(await openCurrentItemTab(run, item))) return;
   if (!item.leaseId) return finishItem(run, item, "failed", "详情标签页租约不可用");
   await saveOpeningRunAndDetailAlarm(run, item);
@@ -601,8 +710,8 @@ async function processAutomaticDelivery(run: BatchRun, item: BatchItem): Promise
     && record.platform === item.candidate.platform
     && record.platformJobId === item.candidate.jobId
   );
-  if (!opportunity || opportunity.status !== "draft_ready") {
-    await pauseAutomaticRunBeforeWrite(run, "opportunity_not_ready", "职位草稿状态已变化");
+  if (!opportunity || !["draft_ready", "extracting"].includes(opportunity.status)) {
+    await pauseAutomaticRunBeforeWrite(run, "opportunity_not_ready", "职位状态已变化，自动投递授权失效");
     return;
   }
   let draftIdentity: Awaited<ReturnType<typeof loadCurrentDraftIdentity>>;
@@ -651,7 +760,12 @@ async function processAutomaticDelivery(run: BatchRun, item: BatchItem): Promise
     if (!latestRun || latestRun.id !== run.id) return;
     const completed = latest.applicationStatus === "verified" && latest.greetingStatus === "verified"
       ? completeDeliverySucceeded(latestRun, now())
-      : completeDeliveryPartialAndPause(latestRun, "component_unverified", latest.latestReason || "投递或招呼语结果需要复核", now());
+      : completeDeliveryPartialAndPause(
+        latestRun,
+        "component_unverified",
+        deliveryPartialReason(latest),
+        now()
+      );
     await closeItemTab(tabToClose);
     await saveRun(completed);
     await notifyState();
@@ -742,7 +856,6 @@ async function handleDetail(job: DetailJob, leaseId: string): Promise<void> {
   if (!opportunity) return finishItem(run, item, "failed", "职位记录不存在");
 
   try {
-    await recordJobDetails(opportunity.id, crypto.randomUUID(), job, await sourceHash(job.description));
     if (run.executionPolicy === "automatic_send"
       && item.opportunityId
       && item.draftRevisionId
@@ -760,6 +873,7 @@ async function handleDetail(job: DetailJob, leaseId: string): Promise<void> {
       await scheduleQueue(0);
       return;
     }
+    await recordJobDetails(opportunity.id, crypto.randomUUID(), job, await sourceHash(job.description));
     const settings = await loadSettings();
     const profile = await activeProfile();
     if (!profile) return finishItem(run, item, "review_required", "已启用画像不存在");
@@ -797,6 +911,20 @@ async function handleDetail(job: DetailJob, leaseId: string): Promise<void> {
   }
 }
 
+async function handleDetailPageReady(
+  sender: chrome.runtime.MessageSender,
+  jobId: string
+): Promise<string | null> {
+  if (!isTrustedLiepinContentSender(sender, jobId)) return null;
+  const run = await getRun();
+  if (!run || (run.status !== "running" && run.status !== "paused")) return null;
+  const item = run.items[run.currentIndex];
+  if (!item || (item.status !== "opening" && item.status !== "extracting")) return null;
+  if (item.candidate.jobId !== jobId) return null;
+  if (item.tabId !== sender.tab?.id) return null;
+  return item.leaseId ?? null;
+}
+
 async function pauseBatch(): Promise<void> {
   const run = await getRun();
   if (run?.status === "running") {
@@ -816,6 +944,7 @@ async function resumeBatch(): Promise<void> {
       } else {
         clearItemBlocker(item);
         run.pauseReason = undefined;
+        run.nextNavigationEligibleAt = undefined;
         run.nextWriteEligibleAt = undefined;
         run.status = "running";
         item.status = "queued";
@@ -856,9 +985,20 @@ async function cancelBatch(): Promise<void> {
   await notifyState();
 }
 
-async function handleDetailFailure(run: BatchRun, item: BatchItem, error: string): Promise<void> {
-  if (run.executionPolicy === "automatic_send") {
-    await pauseAutomaticRunBeforeWrite(run, "detail_unavailable", error);
+async function handleDetailFailure(
+  run: BatchRun,
+  item: BatchItem,
+  error: string,
+  code?: DetailFailureCode
+): Promise<void> {
+  if (run.executionPolicy === "automatic_send" && code !== "job_unavailable") {
+    const userResolvable = code === "login_required" || code === "risk_control";
+    await pauseAutomaticRunBeforeWrite(
+      run,
+      userResolvable ? code : "detail_unavailable",
+      error,
+      userResolvable
+    );
     return;
   }
   await finishItem(run, item, "failed", error);
@@ -979,6 +1119,16 @@ async function generateForOpportunity(opportunityId: string): Promise<void> {
   parseGreetingDecision(output, job, profile);
 }
 
+async function runUserGenerationOnce<T>(opportunityId: string, operation: () => Promise<T>): Promise<T> {
+  if (userGenerationInFlight.has(opportunityId)) throw new Error("该职位正在生成草稿，请稍候");
+  userGenerationInFlight.add(opportunityId);
+  try {
+    return await operation();
+  } finally {
+    userGenerationInFlight.delete(opportunityId);
+  }
+}
+
 function currentDraftRevision(draft: { currentText: string; revisions: Array<{ id: string; text: string; createdAt: string }> }): { id: string; text: string } | null {
   const matching = draft.revisions
     .filter((revision) => revision.text === draft.currentText)
@@ -1023,14 +1173,55 @@ export function isTrustedOptionsSender(sender: chrome.runtime.MessageSender): bo
   return isTrustedExtensionPageSender(sender, "options.html");
 }
 
-async function findOpenLiepinDetailTab(platformJobId: string): Promise<number> {
+function isExactLiepinDetailUrl(value: string, platformJobId: string): boolean {
+  try {
+    const url = new URL(value);
+    const isLiepinHost = url.hostname === "liepin.com" || url.hostname.endsWith(".liepin.com");
+    return url.protocol === "https:"
+      && isLiepinHost
+      && (url.pathname === "/job/" + platformJobId + ".shtml"
+        || url.pathname === "/a/" + platformJobId + ".shtml");
+  } catch {
+    return false;
+  }
+}
+
+async function findOrOpenLiepinDetailTab(opportunity: OpportunityRecord): Promise<{ tabId: number; openedByExtension: boolean }> {
   const tabs = await chrome.tabs.query({ url: ["https://*.liepin.com/job/*.shtml*", "https://*.liepin.com/a/*.shtml*"] });
   const tab = tabs.find((candidate) => {
     if (typeof candidate.id !== "number" || !candidate.url) return false;
-    return new RegExp("/(?:job|a)/" + platformJobId + "\\.shtml(?:[?#]|$)", "i").test(candidate.url);
+    return isExactLiepinDetailUrl(candidate.url, opportunity.platformJobId);
   });
-  if (typeof tab?.id !== "number") throw new Error("请先打开该猎聘职位详情页，再回到管理页准备发送");
-  return tab.id;
+  if (typeof tab?.id === "number") return { tabId: tab.id, openedByExtension: false };
+  if (!isExactLiepinDetailUrl(opportunity.canonicalUrl, opportunity.platformJobId)) {
+    throw new Error("职位详情地址无效，无法执行发送前检查");
+  }
+  const opened = await chrome.tabs.create({ url: opportunity.canonicalUrl, active: false });
+  if (typeof opened.id !== "number") throw new Error("无法打开猎聘职位详情页");
+  return { tabId: opened.id, openedByExtension: true };
+}
+
+async function sendReviewedSendPreflightWhenReady(
+  tabId: number,
+  message: unknown,
+  reloadStaleExistingTab: boolean
+): Promise<unknown> {
+  const deadline = Date.now() + REVIEWED_SEND_CONTENT_READY_TIMEOUT_MS;
+  let lastError: unknown;
+  let reloaded = false;
+  while (Date.now() <= deadline) {
+    try {
+      return await chrome.tabs.sendMessage(tabId, message);
+    } catch (error) {
+      lastError = error;
+      if (reloadStaleExistingTab && !reloaded) {
+        await chrome.tabs.reload(tabId).catch(() => undefined);
+        reloaded = true;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, REVIEWED_SEND_CONTENT_RETRY_INTERVAL_MS));
+  }
+  throw lastError instanceof Error ? lastError : new Error("猎聘职位详情页尚未准备好");
 }
 
 function parseReviewedSendPreflight(raw: unknown): { ok: boolean; reason?: string; blocker?: string; actionTier?: string; resumeMode?: string } {
@@ -1330,7 +1521,7 @@ async function prepareReviewedSend(
     throw new Error("当前为仅生成模式，不能发起真实投递");
   }
   const { opportunity } = await loadReviewedSendIdentity(opportunityId, draftRevisionId, draftSha256);
-  const tabId = await findOpenLiepinDetailTab(opportunity.platformJobId);
+  const detailTab = await findOrOpenLiepinDetailTab(opportunity);
   const leaseId = crypto.randomUUID();
   await recordReviewedDeliveryAttempt({
     opportunityId,
@@ -1342,11 +1533,11 @@ async function prepareReviewedSend(
   });
   let preflight: ReturnType<typeof parseReviewedSendPreflight>;
   try {
-    preflight = parseReviewedSendPreflight(await chrome.tabs.sendMessage(tabId, {
+    preflight = parseReviewedSendPreflight(await sendReviewedSendPreflightWhenReady(detailTab.tabId, {
       type: "CONTENT_REVIEWED_SEND_PREFLIGHT",
       leaseId,
       platformJobId: opportunity.platformJobId
-    }));
+    }, !detailTab.openedByExtension));
   } catch {
     await recordReviewedDeliveryAttempt({
       opportunityId,
@@ -1374,11 +1565,12 @@ async function prepareReviewedSend(
   reviewedSendLeases.set(opportunityId, {
     opportunityId,
     platformJobId: opportunity.platformJobId,
-    tabId,
+    tabId: detailTab.tabId,
     leaseId,
     draftRevisionId,
     draftSha256,
-    preparedAt: Date.now()
+    preparedAt: Date.now(),
+    openedByExtension: detailTab.openedByExtension
   });
   const prepared = await recordReviewedDeliveryAttempt({
     opportunityId,
@@ -1430,6 +1622,9 @@ async function confirmReviewedSend(
       settings: await loadSettings()
     });
     await notifyState();
+    if (lease.openedByExtension && latest.overallStatus === "succeeded") {
+      await chrome.tabs.remove(lease.tabId).catch(() => undefined);
+    }
     return latest;
   } finally {
     releaseLiveWriteLock?.();
@@ -1448,20 +1643,22 @@ async function handleReviewDecision(
     await appendUserEvent(opportunityId, "user_excluded", { reason: "用户在复核中永久排除" });
     return;
   }
-  const evaluations = await listEvaluations();
-  if (!evaluations.some((evaluation) => evaluation.opportunityId === opportunityId)) {
-    const settings = await loadSettings();
-    const { profile, job } = await findOpportunityAndProfile(opportunityId);
-    const output = unwrapGateway(await invokeModel("evaluate_opportunity", {
-      opportunityId,
-      job,
-      profile,
-      filter: { outcome: "review", decisions: [] }
-    }, settings));
-    const suitability = parseSuitabilityDecision(output, job, profile);
-    if (suitability.outcome !== "proceed") return;
-  }
-  await generateForOpportunity(opportunityId);
+  await runUserGenerationOnce(opportunityId, async () => {
+    const evaluations = await listEvaluations();
+    if (!evaluations.some((evaluation) => evaluation.opportunityId === opportunityId)) {
+      const settings = await loadSettings();
+      const { profile, job } = await findOpportunityAndProfile(opportunityId);
+      const output = unwrapGateway(await invokeModel("evaluate_opportunity", {
+        opportunityId,
+        job,
+        profile,
+        filter: { outcome: "review", decisions: [] }
+      }, settings));
+      const suitability = parseSuitabilityDecision(output, job, profile);
+      if (suitability.outcome !== "proceed") return;
+    }
+    await generateForOpportunity(opportunityId);
+  });
 }
 
 async function notifyState(): Promise<void> {
@@ -1550,14 +1747,20 @@ async function handleRequest(
     case "ACTIVATE_PROFILE":
       await activateProfile(request.profileId);
       return undefined;
+    case "DETAIL_PAGE_READY":
+      return handleDetailPageReady(sender, request.jobId);
     case "DETAIL_READY":
       await handleDetail(request.job, request.leaseId);
       return undefined;
     case "DETAIL_FAILED": {
       const run = await getRun();
       const item = run?.items[run.currentIndex];
-      if (run && item?.leaseId === request.leaseId && item.candidate.jobId === request.jobId) {
-        await handleDetailFailure(run, item, request.error);
+      if (run
+        && item?.leaseId === request.leaseId
+        && item.candidate.jobId === request.jobId
+        && item.tabId === sender.tab?.id
+        && isTrustedLiepinContentSender(sender, request.jobId)) {
+        await handleDetailFailure(run, item, request.error, request.code);
       }
       return undefined;
     }
@@ -1577,14 +1780,16 @@ async function handleRequest(
       return undefined;
     }
     case "REGENERATE_DRAFT":
-      await generateForOpportunity(request.opportunityId);
+      await runUserGenerationOnce(request.opportunityId, () => generateForOpportunity(request.opportunityId));
       return undefined;
     case "REVIEW_DECISION":
       await handleReviewDecision(request.opportunityId, request.decision);
       return undefined;
     case "CONTINUE_AS_EXCEPTION":
-      await appendUserEvent(request.opportunityId, "user_override", { reason: "用户选择作为例外继续" });
-      await generateForOpportunity(request.opportunityId);
+      await runUserGenerationOnce(request.opportunityId, async () => {
+        await appendUserEvent(request.opportunityId, "user_override", { reason: "用户选择作为例外继续" });
+        await generateForOpportunity(request.opportunityId);
+      });
       return undefined;
     case "CLEAR_LEGACY_DATA":
       await clearLegacyData();
@@ -1643,7 +1848,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     if ((run?.status === "running" || run?.status === "paused")
       && item?.leaseId
       && detailAlarmName(run.id, item.leaseId) === alarm.name) {
-      await handleDetailFailure(run, item, "详情页读取超时");
+      await handleDetailFailure(run, item, "详情页读取超时", "dom_timeout");
     }
   })().catch(reportAsyncError);
 });

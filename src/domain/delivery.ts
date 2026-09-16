@@ -33,6 +33,23 @@ export function deriveDeliveryOverallStatus(
   return forced ?? "ready";
 }
 
+function deliveryComponentReason(
+  label: "正式投递" | "招呼语",
+  status: DeliveryComponentStatus
+): string {
+  if (status === "verified") return label + "已从猎聘页面验证";
+  if (status === "attempted") return label + "已尝试，尚未取得独立平台证据";
+  if (status === "failed") return label + "未完成";
+  return label + "尚未执行";
+}
+
+export function deliveryPartialReason(record: DeliveryRecord): string {
+  return [
+    deliveryComponentReason("正式投递", record.applicationStatus),
+    deliveryComponentReason("招呼语", record.greetingStatus)
+  ].join("；");
+}
+
 export function applyDeliveryPatch(
   record: DeliveryRecord,
   patch: DeliveryComponentPatch,

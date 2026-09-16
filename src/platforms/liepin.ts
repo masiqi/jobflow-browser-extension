@@ -1,7 +1,12 @@
 import { canonicalJobUrl } from "../filters";
 import type { DetailJob, ListCandidate } from "../types";
 
-const text = (root: ParentNode, selector: string): string => (root.querySelector<HTMLElement>(selector)?.innerText || root.querySelector(selector)?.textContent || "").replace(/\s+/g, " ").trim();
+const text = (root: ParentNode, selector: string): string => {
+  const element = composedQueryAll<HTMLElement>(root, selector)[0];
+  return (element?.innerText || element?.textContent || "").replace(/\s+/g, " ").trim();
+};
+const LIEPIN_CHAT_SURFACE_TIMEOUT_MS = 15_000;
+const LIEPIN_GREETING_EVIDENCE_TIMEOUT_MS = 15_000;
 
 export function isLiepinListPage(location: Location = window.location): boolean {
   if (!/(^|\.)liepin\.com$/.test(location.hostname)) return false;
@@ -13,17 +18,33 @@ export function isLiepinDetailPage(location: Location = window.location): boolea
   return /(^|\.)liepin\.com$/.test(location.hostname) && /\/(?:job|a)\/\d+\.shtml/i.test(location.pathname);
 }
 
-export function detectLiepinBlockedPage(root: ParentNode = document): "login_required" | "risk_control" | null {
+export type LiepinBlockedPage = "login_required" | "risk_control" | "job_unavailable";
+
+export function detectLiepinBlockedPage(
+  root: ParentNode = document,
+  pageLocation: Location = window.location
+): LiepinBlockedPage | null {
   const source = root instanceof Document ? root.body?.textContent : root.textContent;
   const value = (source || "").replace(/\s+/g, " ").slice(0, 20_000);
+  const unavailableBanner = text(root, ".stop-apply-header");
+  if (/(?:该)?职位(?:已)?(?:暂停招聘|停止招聘|下线|过期|不存在)/.test(unavailableBanner)) return "job_unavailable";
+  if (root instanceof Document && /安全中心.*风险提示/.test(root.title)) return "risk_control";
+  if (pageLocation.hostname === "safe.liepin.com" && /(?:^|\/)(?:intercept|verifysms)(?:\/|$)/i.test(pageLocation.pathname)) {
+    return "risk_control";
+  }
   if (/安全验证|拖动滑块|访问异常|操作频繁|验证码|风险验证/.test(value)) return "risk_control";
   if (/登录后查看|请先登录|扫码登录|密码登录/.test(value)) return "login_required";
   return null;
 }
 
+export function liepinBlockedPageReason(blocked: LiepinBlockedPage): string {
+  if (blocked === "risk_control") return "猎聘详情页需要安全验证";
+  if (blocked === "login_required") return "猎聘详情页需要登录";
+  return "猎聘职位已暂停招聘或不可用";
+}
+
 export type LiepinReviewedSendBlocker =
-  | "login_required"
-  | "risk_control"
+  | LiepinBlockedPage
   | "wrong_job"
   | "not_detail_page"
   | "missing_action"
@@ -50,11 +71,56 @@ export interface LiepinReviewedSendResult {
 
 const normalizeMessageText = (value: string): string => value.replace(/\s+/g, " ").trim();
 
-function isVisibleElement(element: HTMLElement): boolean {
-  if (element.hidden || element.getAttribute("aria-hidden") === "true") return false;
-  const style = element.ownerDocument.defaultView?.getComputedStyle(element);
-  if (style && (style.display === "none" || style.visibility === "hidden" || style.pointerEvents === "none")) return false;
+function isRenderableElement(element: HTMLElement, checkPointerEvents: boolean): boolean {
+  let current: HTMLElement | null = element;
+  while (current) {
+    if (current.hidden || current.getAttribute("aria-hidden") === "true") return false;
+    const style = current.ownerDocument.defaultView?.getComputedStyle(current);
+    if (style && (
+      style.display === "none"
+      || style.visibility === "hidden"
+      || style.visibility === "collapse"
+      || checkPointerEvents && style.pointerEvents === "none"
+    )) return false;
+    if (current.parentElement) {
+      current = current.parentElement;
+      continue;
+    }
+    const root = current.getRootNode();
+    current = root instanceof ShadowRoot && root.host instanceof HTMLElement ? root.host : null;
+  }
   return true;
+}
+
+function isRenderedElement(element: HTMLElement): boolean {
+  return isRenderableElement(element, false);
+}
+
+function isVisibleElement(element: HTMLElement): boolean {
+  return isRenderableElement(element, true);
+}
+
+function composedQueryAll<T extends Element>(root: ParentNode, selector: string): T[] {
+  const visitedScopes = new Set<Node>();
+  const matches = new Set<T>();
+  const visit = (scope: ParentNode): void => {
+    if (visitedScopes.has(scope)) return;
+    visitedScopes.add(scope);
+    for (const element of scope.querySelectorAll<T>(selector)) matches.add(element);
+    for (const element of scope.querySelectorAll<HTMLElement>("*")) {
+      if (element.shadowRoot) visit(element.shadowRoot);
+      if (element.tagName === "IFRAME") {
+        try {
+          const frameDocument = (element as HTMLIFrameElement).contentDocument;
+          if (frameDocument && isRenderedElement(element)) visit(frameDocument);
+        } catch {
+          // Cross-origin frames are intentionally outside the content-script boundary.
+        }
+      }
+    }
+  };
+  visit(root);
+  return [...matches];
 }
 
 function isDisabledElement(element: HTMLElement): boolean {
@@ -63,12 +129,20 @@ function isDisabledElement(element: HTMLElement): boolean {
     || /\b(disabled|disable)\b/i.test(element.className);
 }
 
+function matchesLiepinActionJobId(actionJobId: string | undefined, platformJobId: string): boolean {
+  if (!actionJobId) return false;
+  if (actionJobId === platformJobId) return true;
+  return /^\d{8}$/.test(actionJobId)
+    && /^\d{9,}$/.test(platformJobId)
+    && platformJobId.endsWith(actionJobId);
+}
+
 function actionCandidates(root: ParentNode, platformJobId: string, tier: "primary" | "secondary"): HTMLElement[] {
   const selector = tier === "primary"
     ? 'a.btn-main[data-selector="chat-chat"],button.btn-main[data-selector="chat-chat"]'
     : 'a.btn-chat[data-selector="chat-chat"],button.btn-chat[data-selector="chat-chat"]';
-  return [...root.querySelectorAll<HTMLElement>(selector)]
-    .filter((element) => element.dataset.jobid === platformJobId)
+  return composedQueryAll<HTMLElement>(root, selector)
+    .filter((element) => matchesLiepinActionJobId(element.dataset.jobid, platformJobId))
     .filter(isVisibleElement);
 }
 
@@ -92,8 +166,8 @@ function findApplicationConfirmation(root: ParentNode): ApplicationConfirmation 
   const source = (root instanceof Document ? root.body?.textContent : root.textContent) || "";
   const textValue = source.replace(/\s+/g, " ").slice(0, 20_000);
   const hasPickerText = /请选择简历|选择(?:附件)?简历|切换简历/.test(textValue);
-  const controls = [...root.querySelectorAll<HTMLElement>("button,a,[role=button]")]
-    .filter(isVisibleElement)
+  const controls = composedQueryAll<HTMLElement>(root, "button,a,[role=button]")
+    .filter(isRenderedElement)
     .filter((element) => !isDisabledElement(element))
     .filter((element) => elementLabel(element) === "立即投递");
   if (!hasPickerText && controls.length === 0) return null;
@@ -103,7 +177,7 @@ function findApplicationConfirmation(root: ParentNode): ApplicationConfirmation 
     if (/选择(?:附件)?简历/.test(elementLabel(scope))) break;
     scope = scope.parentElement;
   }
-  const radios = scope ? [...scope.querySelectorAll<HTMLInputElement>('input[type="radio"]')] : [];
+  const radios = scope ? composedQueryAll<HTMLInputElement>(scope, 'input[type="radio"]') : [];
   const selected = radios.filter((radio) => radio.checked || radio.getAttribute("aria-checked") === "true");
   if (radios.length > 0 && selected.length !== 1) return { status: "ambiguous" };
   if (radios.length === 0 && !/默认在线简历|默认简历|当前简历/.test(scope ? elementLabel(scope) : textValue)) {
@@ -128,7 +202,7 @@ export function preflightLiepinReviewedSend(
       platformJobId,
       resumeMode: "platform_default",
       blocker: blocked,
-      reason: blocked === "risk_control" ? "猎聘页面需要安全验证" : "猎聘页面需要登录"
+      reason: liepinBlockedPageReason(blocked)
     };
   }
   if (!/\/(?:job|a)\/\d+\.shtml/i.test(new URL(href).pathname)) {
@@ -195,15 +269,15 @@ function applicationVerified(
   const textValue = ((root instanceof Document ? root.body?.textContent : root.textContent) || "").replace(/\s+/g, " ");
   const statusPattern = "已投递|投递成功|已申请|申请成功|简历已发送|已发送简历|发送了简历";
   return new RegExp("(" + statusPattern + ").{0,80}" + platformJobId + "|" + platformJobId + ".{0,80}(" + statusPattern + ")").test(textValue)
-    || [...root.querySelectorAll<HTMLElement>("[data-jobid]")]
-      .filter((element) => element.dataset.jobid === platformJobId)
+    || composedQueryAll<HTMLElement>(root, "[data-jobid]")
+      .filter((element) => matchesLiepinActionJobId(element.dataset.jobid, platformJobId))
       .some((element) => /已投递|投递成功|已申请|申请成功|简历已发送|已发送简历|发送了简历/.test(element.innerText || element.textContent || ""))
     || Boolean(chatEvidenceRoot && applicationEvidenceTexts(chatEvidenceRoot).size > 0);
 }
 
 function applicationEvidenceTexts(root: ParentNode): Set<string> {
   return new Set(
-    [...root.querySelectorAll<HTMLElement>("*")]
+    composedQueryAll<HTMLElement>(root, "*")
       .filter((element) => element.children.length === 0)
       .filter(isVisibleElement)
       .map(elementLabel)
@@ -231,18 +305,32 @@ function visibleTextControls(root: ParentNode): HTMLElement[] {
     'input[type="text"]:not([disabled])',
     '[contenteditable="true"]'
   ];
-  return selectors.flatMap((selector) => [...root.querySelectorAll<HTMLElement>(selector)])
-    .filter(isVisibleElement);
+  return selectors.flatMap((selector) => composedQueryAll<HTMLElement>(root, selector))
+    .filter(isRenderedElement);
 }
 
 function visibleSendControls(root: ParentNode): HTMLElement[] {
-  return [...root.querySelectorAll<HTMLElement>("button,a")]
-    .filter(isVisibleElement)
+  return composedQueryAll<HTMLElement>(root, "button,a")
+    .filter(isRenderedElement)
     .filter((element) => elementLabel(element) === "发送");
 }
 
+function nearestComposedAncestor(element: HTMLElement, selector: string): HTMLElement | null {
+  let current: HTMLElement | null = element;
+  while (current) {
+    if (current.matches(selector)) return current;
+    if (current.parentElement) {
+      current = current.parentElement;
+      continue;
+    }
+    const root = current.getRootNode();
+    current = root instanceof ShadowRoot && root.host instanceof HTMLElement ? root.host : null;
+  }
+  return null;
+}
+
 function findResumeControl(root: ParentNode): HTMLElement | null {
-  const candidates = [...root.querySelectorAll<HTMLElement>("button,a,[role=button],div,span")]
+  const candidates = composedQueryAll<HTMLElement>(root, "button,a,[role=button],div,span")
     .filter(isVisibleElement)
     .filter((element) => elementLabel(element) === "发简历")
     .filter((element) => ![...element.children].some((child) => elementLabel(child as HTMLElement) === "发简历"));
@@ -253,6 +341,21 @@ interface LiepinChatSurface {
   root: HTMLElement;
   composer: HTMLElement;
   send: HTMLElement;
+}
+
+function knownLiepinChatSurfaces(root: ParentNode): LiepinChatSurface[] {
+  return composedQueryAll<HTMLElement>(root, ".im-ui-chat-input")
+    .filter(isRenderedElement)
+    .map((surfaceRoot): LiepinChatSurface | null => {
+      const composers = composedQueryAll<HTMLElement>(surfaceRoot, "textarea.im-ui-textarea:not([disabled])")
+        .filter(isRenderedElement);
+      const sendControls = composedQueryAll<HTMLElement>(surfaceRoot, ".im-ui-basic-send-btn")
+        .filter(isRenderedElement);
+      if (composers.length !== 1 || sendControls.length !== 1) return null;
+      const chatRoot = nearestComposedAncestor(surfaceRoot, ".im-ui-chat-container") || surfaceRoot;
+      return { root: chatRoot, composer: composers[0]!, send: sendControls[0]! };
+    })
+    .filter((surface): surface is LiepinChatSurface => Boolean(surface));
 }
 
 function chatSurfaceForComposer(composer: HTMLElement): LiepinChatSurface | null {
@@ -270,6 +373,9 @@ function chatSurfaceForComposer(composer: HTMLElement): LiepinChatSurface | null
 }
 
 function findNewChatSurface(root: ParentNode, existingControls: Set<HTMLElement>): LiepinChatSurface | null {
+  const knownSurfaces = knownLiepinChatSurfaces(root)
+    .filter((surface) => !existingControls.has(surface.composer));
+  if (knownSurfaces.length > 0) return knownSurfaces.length === 1 ? knownSurfaces[0]! : null;
   const surfaces = visibleTextControls(root)
     .filter((control) => !existingControls.has(control))
     .map(chatSurfaceForComposer)
@@ -278,6 +384,8 @@ function findNewChatSurface(root: ParentNode, existingControls: Set<HTMLElement>
 }
 
 function findExistingChatSurface(root: ParentNode): LiepinChatSurface | null {
+  const knownSurfaces = knownLiepinChatSurfaces(root);
+  if (knownSurfaces.length > 0) return knownSurfaces.length === 1 ? knownSurfaces[0]! : null;
   const surfaces = visibleTextControls(root)
     .map(chatSurfaceForComposer)
     .filter((surface): surface is LiepinChatSurface => Boolean(surface));
@@ -298,32 +406,75 @@ async function waitForNewChatSurface(
   return null;
 }
 
+function isEditableElement(element: HTMLElement): boolean {
+  return element.matches('textarea,input,[contenteditable="true"]')
+    || Boolean(element.closest('textarea,input,[contenteditable="true"]'));
+}
+
+function normalizedElementText(element: HTMLElement): string {
+  return normalizeMessageText(element.innerText || element.textContent || "");
+}
+
+function hasOutboundMessageMarker(element: HTMLElement): boolean {
+  const markerValues = [
+    element.className,
+    element.getAttribute("data-direction"),
+    element.getAttribute("data-message-direction"),
+    element.getAttribute("data-sender"),
+    element.getAttribute("data-owner"),
+    element.getAttribute("data-is-self"),
+    element.getAttribute("data-self"),
+    element.getAttribute("data-message-owner"),
+    element.getAttribute("aria-label")
+  ].filter((value): value is string => Boolean(value));
+  return markerValues.some((value) => /(?:^|[-_\s])(self|mine|right|out|outgoing|outbound|send|sent|我|己方|本人)(?:$|[-_\s])/i.test(value)
+    || /(?:^|[-_\s])0(?:$|[-_\s])/.test(value));
+}
+
+function isMessageLikeElement(element: HTMLElement): boolean {
+  if (hasOutboundMessageMarker(element)) return true;
+  let parent = element.parentElement;
+  while (parent) {
+    if (hasOutboundMessageMarker(parent)) return true;
+    parent = parent.parentElement;
+  }
+  return false;
+}
+
+function containsExactText(element: HTMLElement, expected: string): boolean {
+  if (isEditableElement(element) || !isRenderedElement(element)) return false;
+  if (normalizedElementText(element) === expected) return true;
+  return composedQueryAll<HTMLElement>(element, "*")
+    .filter((child) => !isEditableElement(child))
+    .filter(isRenderedElement)
+    .some((child) => normalizedElementText(child) === expected);
+}
+
 function outboundGreetingVerified(root: ParentNode, draftText: string): boolean {
   const expected = normalizeMessageText(draftText);
-  const selectors = [
+  const allElements = composedQueryAll<HTMLElement>(root, "*")
+    .filter((element) => !isEditableElement(element))
+    .filter(isRenderedElement);
+  const knownSelectors = [
     ".message-self",
     ".message-mine",
     ".chat-message-self",
     ".chat-message-right",
+    ".im-ui-txt.im-ui-send",
+    '[class*="im-ui-txt"][class*="im-ui-send"]',
     '[class*="message"][class*="self"]',
     '[class*="message"][class*="mine"]',
     '[class*="message"][class*="right"]'
   ];
-  const matchedKnownBubble = selectors.some((selector) =>
-    [...root.querySelectorAll<HTMLElement>(selector)]
-      .some((element) => {
-        if (normalizeMessageText(element.innerText || element.textContent || "") === expected) return true;
-        return [...element.querySelectorAll<HTMLElement>("*")]
-          .filter((child) => child.children.length === 0)
-          .some((child) => normalizeMessageText(child.innerText || child.textContent || "") === expected);
-      })
-  );
-  if (matchedKnownBubble) return true;
-  return [...root.querySelectorAll<HTMLElement>("*")]
-    .filter((element) => element.children.length === 0)
-    .filter(isVisibleElement)
-    .filter((element) => !element.matches('textarea,input,[contenteditable="true"]'))
-    .some((element) => normalizeMessageText(element.innerText || element.textContent || "") === expected);
+  if (knownSelectors.some((selector) => composedQueryAll<HTMLElement>(root, selector)
+    .filter((element) => !isEditableElement(element))
+    .filter(isRenderedElement)
+    .some((element) => containsExactText(element, expected)))) {
+    return true;
+  }
+  const markedMessages = allElements.filter(isMessageLikeElement);
+  if (markedMessages.some((element) => containsExactText(element, expected))) return true;
+  return false;
 }
 
 async function waitForObservation(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
@@ -378,7 +529,7 @@ export async function executeLiepinReviewedSend(
     }
     const existingControls = new Set(visibleTextControls(root));
     dispatchAllowedClick(action.element);
-    surface = await waitForNewChatSurface(root, existingControls, 4000);
+    surface = await waitForNewChatSurface(root, existingControls, LIEPIN_CHAT_SURFACE_TIMEOUT_MS);
     reusedChatSurface = false;
   }
   let application: LiepinReviewedSendResult["application"] = !needsApplication
@@ -420,6 +571,18 @@ export async function executeLiepinReviewedSend(
       reason: "猎聘默认简历选择不明确"
     };
   }
+  if (needsGreeting && surface && outboundGreetingVerified(surface.root, draftText)) {
+    return {
+      ok: application === "verified",
+      application,
+      greeting: "verified",
+      evidenceCodes: [
+        application === "verified" ? "application_status_verified" : "native_action_attempted",
+        "outbound_greeting_exact_match",
+        reusedChatSurface ? "chat_surface_reused" : "chat_surface_opened"
+      ]
+    };
+  }
   if (!needsGreeting) {
     return {
       ok: application === "verified",
@@ -453,7 +616,10 @@ export async function executeLiepinReviewedSend(
     };
   }
   dispatchAllowedClick(surface.send);
-  const greeting = await waitForObservation(() => outboundGreetingVerified(surface.root, draftText), 4000)
+  const greeting = await waitForObservation(
+    () => outboundGreetingVerified(surface.root, draftText),
+    LIEPIN_GREETING_EVIDENCE_TIMEOUT_MS
+  )
     ? "verified"
     : "attempted";
   return {

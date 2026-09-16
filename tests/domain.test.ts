@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyDeliveryPatch, deriveDeliveryOverallStatus } from "../src/domain/delivery";
+import { applyDeliveryPatch, deriveDeliveryOverallStatus, deliveryPartialReason } from "../src/domain/delivery";
 import { canContinueAsException, projectOpportunity, projectRuleEvidence } from "../src/domain/events";
 import type { DeliveryRecord, OpportunityEvent, OpportunityRecord } from "../src/types";
 
@@ -115,5 +115,19 @@ describe("reviewed delivery projection", () => {
     const retried = applyDeliveryPatch(failed, { greetingStatus: "attempted" }, "2026-01-01T00:00:02.000Z");
     expect(retried.greetingStatus).toBe("attempted");
     expect(retried.overallStatus).toBe("in_progress");
+  });
+
+  it("names the unverified component in a partial delivery reason", () => {
+    const partial: DeliveryRecord = {
+      ...delivery,
+      overallStatus: "partial",
+      applicationStatus: "attempted",
+      greetingStatus: "verified",
+      latestReason: "招呼语已从猎聘页面验证"
+    };
+
+    expect(deliveryPartialReason(partial)).toBe(
+      "正式投递已尝试，尚未取得独立平台证据；招呼语已从猎聘页面验证"
+    );
   });
 });

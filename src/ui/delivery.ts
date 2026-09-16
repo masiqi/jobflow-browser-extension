@@ -1,3 +1,4 @@
+import { deliveryPartialReason } from "../domain/delivery";
 import type { DeliveryRecord, OpportunityRecord } from "../types";
 
 export const DELIVERY_COMPONENT_LABELS: Record<DeliveryRecord["applicationStatus"], string> = {
@@ -45,4 +46,15 @@ const DELIVERY_RECORD_LABELS: Record<DeliveryRecord["overallStatus"], string> = 
 
 export function recordStatusLabel(record: OpportunityRecord, delivery?: DeliveryRecord): string {
   return delivery ? DELIVERY_RECORD_LABELS[delivery.overallStatus] : OPPORTUNITY_STATUS_LABELS[record.status];
+}
+
+export function deliveryDisplayReason(delivery?: DeliveryRecord): string | undefined {
+  if (!delivery) return undefined;
+  const hasVerifiedComponent = delivery.applicationStatus === "verified" || delivery.greetingStatus === "verified";
+  const hasMissingComponent = delivery.applicationStatus !== "verified" || delivery.greetingStatus !== "verified";
+  if (hasVerifiedComponent && hasMissingComponent
+    && (delivery.overallStatus === "partial" || delivery.overallStatus === "review_required")) {
+    return deliveryPartialReason(delivery);
+  }
+  return delivery.latestReason;
 }

@@ -45,6 +45,8 @@ The user separately approved `reviewed_send` for one opportunity at a time. The 
 
 Application and greeting results are persisted independently as attempted, verified, or failed. A delivery is complete only when both components have platform-read evidence. At that amendment date, batch and automatic sending remained unauthorized; the later selected-batch amendment below supersedes that boundary only for explicitly authorized automatic side-panel batches.
 
+Reviewed PREPARE may now open the exact authoritative Liepin detail URL in a background tab, or reload an already-open exact tab once when its post-Reload content context is stale. This remains a read-only navigation/preflight action: it neither clicks Liepin nor reserves quota. CONFIRM remains the only manual write authorization.
+
 ## Amendment: selected-batch automatic submit and contact
 
 - Date: 2026-09-12

@@ -23,6 +23,8 @@ Each review item offers exactly:
 - Continue generation: a deterministic-rule review proceeds to LLM suitability evaluation; an LLM review proceeds to a generation-only model step without repeating suitability evaluation.
 - Permanently exclude: create a user exclusion for the user-owned platform job identity and prevent future detail, evaluation, and draft work.
 
+A review item continued by the user remains a reviewed-send item even when account settings use `automatic_send`; only a direct batch-time `proceed` result is eligible for automatic delivery. The management button acknowledges the request before the first await, and the background permits only one concurrent user-requested generation per opportunity.
+
 Pending items do not trigger work on later scans. Persist the user's decision and time in the opportunity history.
 
 Clear deterministic hard exclusions and persisted LLM exclusions are not overrideable through the ordinary review queue. The record center may offer the separately confirmed Continue as exception transition defined by ADR 0020.

@@ -9,7 +9,12 @@ import {
   createElement
 } from "lucide";
 import { escapeHtml, sendCommand } from "./ui/command";
-import { recordStatusLabel } from "./ui/delivery";
+import { deliveryDisplayReason, recordStatusLabel } from "./ui/delivery";
+import {
+  LIEPIN_DETAIL_NAVIGATION_DELAY_MAX_SECONDS,
+  LIEPIN_DETAIL_NAVIGATION_DELAY_MIN_SECONDS,
+  LIEPIN_DETAIL_MIN_DWELL_SECONDS
+} from "./defaults";
 import type { AppState, BatchRun, DeliveryRecord, OpportunityRecord, ScanPreview } from "./types";
 
 type ScanFeedback = {
@@ -34,6 +39,7 @@ const ITEM_STATUS_LABELS: Record<BatchRun["items"][number]["status"], string> = 
   generating: "正在生成招呼语",
   draft_ready: "草稿已生成",
   delivery_ready: "等待投递",
+  waiting_navigation: "等待详情访问间隔",
   waiting_interval: "等待随机间隔",
   delivery_preflighting: "投递前检查",
   delivery_in_progress: "正在真实投递",
@@ -58,7 +64,9 @@ const POLICY_LABELS: Record<AppState["settings"]["executionPolicy"], { title: st
   },
   automatic_send: {
     title: "自动投递",
-    note: "匹配职位将自动投递并打招呼",
+    note: "匹配职位将自动投递并打招呼 · 详情访问间隔 "
+      + LIEPIN_DETAIL_NAVIGATION_DELAY_MIN_SECONDS + "-" + LIEPIN_DETAIL_NAVIGATION_DELAY_MAX_SECONDS
+      + " 秒 · 最短停留 " + LIEPIN_DETAIL_MIN_DWELL_SECONDS + " 秒",
     button: "一键投递并打招呼"
   }
 };
@@ -158,8 +166,9 @@ function runMarkup(run: BatchRun | null): string {
   if (!run) return '<p class="empty">尚未运行批次。</p>';
   const failures = run.items.filter((item) => item.status === "failed" && item.error);
   const currentItem = run.items[run.currentIndex];
-  const waitSeconds = run.nextWriteEligibleAt
-    ? Math.max(0, Math.ceil((new Date(run.nextWriteEligibleAt).getTime() - Date.now()) / 1000))
+  const nextActionEligibleAt = run.nextNavigationEligibleAt ?? run.nextWriteEligibleAt;
+  const waitSeconds = nextActionEligibleAt
+    ? Math.max(0, Math.ceil((new Date(nextActionEligibleAt).getTime() - Date.now()) / 1000))
     : null;
   return [
     '<div class="run"><div class="progress"><span style="width:',
@@ -170,9 +179,10 @@ function runMarkup(run: BatchRun | null): string {
     " · 复核 ", String(run.reviewCount), " · 失败 ", String(run.failedCount),
     " · 已投递 ", String(run.deliverySucceededCount), " · 待复核投递 ", String(run.deliveryPartialCount), "</small>",
     run.pauseReason ? '<p class="run-pause-reason">暂停原因：' + escapeHtml(run.pauseReason) + "</p>" : "",
-    waitSeconds !== null && run.nextWriteEligibleAt
-      ? '<p class="run-wait" aria-live="polite">距离下一次 JobFlow 投递约 <span data-next-write-at="'
-        + escapeHtml(run.nextWriteEligibleAt) + '">' + String(waitSeconds) + "</span> 秒</p>"
+    waitSeconds !== null && nextActionEligibleAt
+      ? '<p class="run-wait" aria-live="polite">距离下一次'
+        + (run.nextNavigationEligibleAt ? "职位详情访问" : " JobFlow 投递")
+        + '约 <span data-next-action-at="' + escapeHtml(nextActionEligibleAt) + '">' + String(waitSeconds) + "</span> 秒</p>"
       : "",
     currentItem ? '<div class="run-current"><b>' + escapeHtml(currentItem.candidate.title) + '</b><span>'
       + escapeHtml(ITEM_STATUS_LABELS[currentItem.status]) + "</span></div>" : "",
@@ -192,12 +202,12 @@ function clearWaitCountdownTimer(): void {
 }
 
 function updateWaitCountdownText(): void {
-  const countdown = document.querySelector<HTMLElement>("[data-next-write-at]");
+  const countdown = document.querySelector<HTMLElement>("[data-next-action-at]");
   if (!countdown) {
     clearWaitCountdownTimer();
     return;
   }
-  const waitUntil = new Date(countdown.dataset.nextWriteAt || "").getTime();
+  const waitUntil = new Date(countdown.dataset.nextActionAt || "").getTime();
   if (!Number.isFinite(waitUntil)) {
     clearWaitCountdownTimer();
     return;
@@ -207,7 +217,7 @@ function updateWaitCountdownText(): void {
 
 function configureWaitCountdownTimer(): void {
   clearWaitCountdownTimer();
-  if (!document.querySelector("[data-next-write-at]")) return;
+  if (!document.querySelector("[data-next-action-at]")) return;
   updateWaitCountdownText();
   waitCountdownTimer = window.setInterval(updateWaitCountdownText, 1000);
 }
@@ -215,7 +225,7 @@ function configureWaitCountdownTimer(): void {
 function recordsMarkup(records: OpportunityRecord[], deliveries: DeliveryRecord[]): string {
   return records.slice(0, 8).map((record) => {
     const delivery = deliveries.find((item) => item.opportunityId === record.id);
-    const latestReason = delivery?.latestReason ?? record.latestReason;
+    const latestReason = deliveryDisplayReason(delivery) ?? record.latestReason;
     return '<div class="record"><span class="status ' + escapeHtml(delivery?.overallStatus ?? record.status) + '"></span><div><b>'
     + escapeHtml(record.title) + '</b><small>' + escapeHtml(record.company) + " · "
     + escapeHtml(recordStatusLabel(record, delivery)) + '</small>'

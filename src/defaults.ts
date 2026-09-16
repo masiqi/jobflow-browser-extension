@@ -33,6 +33,10 @@ export const DEFAULT_RULES: JdRuleSettings = {
   rejectedPrimaryTechnologies: []
 };
 
+export const LIEPIN_DETAIL_NAVIGATION_DELAY_MIN_SECONDS = 15;
+export const LIEPIN_DETAIL_NAVIGATION_DELAY_MAX_SECONDS = 30;
+export const LIEPIN_DETAIL_MIN_DWELL_SECONDS = 8;
+
 export const DEFAULT_SETTINGS: ExtensionSettings = {
   rules: DEFAULT_RULES,
   model: {
@@ -56,6 +60,7 @@ export const STORAGE_KEYS = {
   run: "jobflow.run.v2",
   scanPreview: "jobflow.scanPreview.v2",
   automaticWriteThrottle: "jobflow.automaticWriteThrottle.v1",
+  liepinNavigationThrottle: "jobflow.liepinNavigationThrottle.v1",
   sessionKey: "jobflow.byok.session.v2",
   rememberedKey: "jobflow.byok.remembered.v2",
   deviceOwner: "jobflow.deviceOwner.v2",

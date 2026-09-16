@@ -1,5 +1,5 @@
 begin;
-select plan(23);
+select plan(30);
 
 insert into auth.users (
   id, instance_id, aud, role, email, encrypted_password,
@@ -13,15 +13,35 @@ insert into public.job_opportunities (
 ) values
   ('00000000-0000-4000-8000-000000000031', '00000000-0000-0000-0000-000000000031', 'liepin', 'delivery-job-1', 'https://www.liepin.com/job/31.shtml', 'Synthetic delivery role', 'draft_ready'),
   ('00000000-0000-4000-8000-000000000032', '00000000-0000-0000-0000-000000000032', 'liepin', 'delivery-job-2', 'https://www.liepin.com/job/32.shtml', 'Other synthetic delivery role', 'draft_ready'),
-  ('00000000-0000-4000-8000-000000000033', '00000000-0000-0000-0000-000000000031', 'liepin', 'delivery-job-3', 'https://www.liepin.com/job/33.shtml', 'Synthetic pending role', 'failed');
+  ('00000000-0000-4000-8000-000000000033', '00000000-0000-0000-0000-000000000031', 'liepin', 'delivery-job-3', 'https://www.liepin.com/job/33.shtml', 'Synthetic pending role', 'failed'),
+  ('00000000-0000-4000-8000-000000000035', '00000000-0000-0000-0000-000000000031', 'liepin', 'delivery-job-5', 'https://www.liepin.com/job/35.shtml', 'Synthetic recovering role', 'extracting'),
+  ('00000000-0000-4000-8000-000000000036', '00000000-0000-0000-0000-000000000031', 'liepin', 'delivery-job-6', 'https://www.liepin.com/job/36.shtml', 'Synthetic unrelated extracting role', 'extracting');
 
 insert into public.message_drafts(opportunity_id, user_id, current_text) values
   ('00000000-0000-4000-8000-000000000031', '00000000-0000-0000-0000-000000000031', 'Synthetic reviewed greeting.'),
-  ('00000000-0000-4000-8000-000000000032', '00000000-0000-0000-0000-000000000032', 'Other reviewed greeting.');
+  ('00000000-0000-4000-8000-000000000032', '00000000-0000-0000-0000-000000000032', 'Other reviewed greeting.'),
+  ('00000000-0000-4000-8000-000000000035', '00000000-0000-0000-0000-000000000031', 'Recovering reviewed greeting.'),
+  ('00000000-0000-4000-8000-000000000036', '00000000-0000-0000-0000-000000000031', 'Unprepared extracting greeting.');
 
 insert into public.draft_revisions(id, request_id, user_id, opportunity_id, kind, text) values
   ('00000000-0000-4000-8000-000000000041', '00000000-0000-4000-8000-000000000051', '00000000-0000-0000-0000-000000000031', '00000000-0000-4000-8000-000000000031', 'generated', 'Synthetic reviewed greeting.'),
-  ('00000000-0000-4000-8000-000000000042', '00000000-0000-4000-8000-000000000052', '00000000-0000-0000-0000-000000000032', '00000000-0000-4000-8000-000000000032', 'generated', 'Other reviewed greeting.');
+  ('00000000-0000-4000-8000-000000000042', '00000000-0000-4000-8000-000000000052', '00000000-0000-0000-0000-000000000032', '00000000-0000-4000-8000-000000000032', 'generated', 'Other reviewed greeting.'),
+  ('00000000-0000-4000-8000-000000000045', '00000000-0000-4000-8000-000000000055', '00000000-0000-0000-0000-000000000031', '00000000-0000-4000-8000-000000000035', 'generated', 'Recovering reviewed greeting.'),
+  ('00000000-0000-4000-8000-000000000046', '00000000-0000-4000-8000-000000000056', '00000000-0000-0000-0000-000000000031', '00000000-0000-4000-8000-000000000036', 'generated', 'Unprepared extracting greeting.');
+
+insert into public.delivery_records(
+  opportunity_id, user_id, platform, platform_job_id, resume_mode,
+  overall_status, draft_revision_id, draft_sha256
+) values (
+  '00000000-0000-4000-8000-000000000035',
+  '00000000-0000-0000-0000-000000000031',
+  'liepin',
+  'delivery-job-5',
+  'platform_default',
+  'ready',
+  '00000000-0000-4000-8000-000000000045',
+  encode(extensions.digest('Recovering reviewed greeting.', 'sha256'), 'hex')
+);
 
 set local role authenticated;
 set local request.jwt.claim.sub = '00000000-0000-0000-0000-000000000031';
@@ -38,6 +58,78 @@ select is(
   (select overall_status from public.delivery_records where opportunity_id = '00000000-0000-4000-8000-000000000031'),
   'ready',
   'prepared delivery starts ready'
+);
+select lives_ok(
+  $$select public.prepare_reviewed_delivery(
+    '00000000-0000-4000-8000-000000000035',
+    '00000000-0000-4000-8000-000000000045',
+    encode(extensions.digest('Recovering reviewed greeting.', 'sha256'), 'hex')
+  )$$,
+  'an extracting projection with an exact current draft can recover for delivery'
+);
+select is(
+  (select current_status from public.job_opportunities where id = '00000000-0000-4000-8000-000000000035'),
+  'draft_ready',
+  'delivery preparation repairs the extracting projection after exact draft validation'
+);
+select lives_ok(
+  $$select public.record_reviewed_delivery_attempt(
+    '00000000-0000-4000-8000-000000000035',
+    '00000000-0000-4000-8000-000000000069',
+    'delivery_confirmed',
+    null,
+    null,
+    'automatic_batch_authorized',
+    '{"source":"sidepanel_batch"}'::jsonb,
+    null,
+    '00000000-0000-4000-8000-000000000045',
+    encode(extensions.digest('Recovering reviewed greeting.', 'sha256'), 'hex')
+  )$$,
+  'automatic batch authorization records its bounded source evidence'
+);
+select is(
+  (select evidence ->> 'source' from public.delivery_attempts
+    where request_id = '00000000-0000-4000-8000-000000000069'),
+  'sidepanel_batch',
+  'automatic batch source evidence is retained'
+);
+select throws_ok(
+  $$select public.record_reviewed_delivery_attempt(
+    '00000000-0000-4000-8000-000000000035',
+    '00000000-0000-4000-8000-000000000070',
+    'delivery_confirmed',
+    null,
+    null,
+    'automatic_batch_authorized',
+    '{"source":"untrusted_page"}'::jsonb
+  )$$,
+  '23514',
+  null,
+  'automatic authorization rejects an unrecognized source value'
+);
+select throws_ok(
+  $$select public.record_reviewed_delivery_attempt(
+    '00000000-0000-4000-8000-000000000035',
+    '00000000-0000-4000-8000-000000000071',
+    'delivery_confirmed',
+    null,
+    null,
+    'automatic_batch_authorized',
+    '{"source":"sidepanel_batch","unknown":"value"}'::jsonb
+  )$$,
+  '23514',
+  null,
+  'automatic authorization still rejects unknown evidence fields'
+);
+select throws_ok(
+  $$select public.prepare_reviewed_delivery(
+    '00000000-0000-4000-8000-000000000036',
+    '00000000-0000-4000-8000-000000000046',
+    encode(extensions.digest('Unprepared extracting greeting.', 'sha256'), 'hex')
+  )$$,
+  '23514',
+  null,
+  'an extracting projection without a prior exact delivery identity remains blocked'
 );
 select throws_ok(
   $$select public.prepare_reviewed_delivery(

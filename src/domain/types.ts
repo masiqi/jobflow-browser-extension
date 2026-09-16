@@ -25,6 +25,7 @@ export type BatchItemStatus =
   | "generating"
   | "draft_ready"
   | "delivery_ready"
+  | "waiting_navigation"
   | "waiting_interval"
   | "delivery_preflighting"
   | "delivery_in_progress"
@@ -319,6 +320,7 @@ export interface BatchRun {
   deliverySucceededCount: number;
   deliveryPartialCount: number;
   pauseReason?: string;
+  nextNavigationEligibleAt?: string;
   nextWriteEligibleAt?: string;
 }
 
@@ -328,6 +330,14 @@ export interface AutomaticWriteThrottle {
   lastWriteStartedAt: string;
   scheduledDelaySeconds: number;
   nextWriteEligibleAt: string;
+}
+
+export interface LiepinNavigationThrottle {
+  ownerId: string;
+  platform: PlatformKey;
+  lastNavigationStartedAt: string;
+  scheduledDelaySeconds: number;
+  nextNavigationEligibleAt: string;
 }
 
 export interface AuthProjection {

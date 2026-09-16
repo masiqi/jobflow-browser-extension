@@ -71,6 +71,36 @@ describe("runtime and endpoint contracts", () => {
     })).toThrow();
   });
 
+  it("accepts only a strict detail-page lease handshake command", () => {
+    expect(decodeRuntimeRequest({
+      type: "DETAIL_PAGE_READY",
+      jobId: "1980000301"
+    })).toEqual({ type: "DETAIL_PAGE_READY", jobId: "1980000301" });
+    expect(() => decodeRuntimeRequest({
+      type: "DETAIL_PAGE_READY",
+      jobId: ""
+    })).toThrow();
+    expect(() => decodeRuntimeRequest({
+      type: "DETAIL_PAGE_READY",
+      jobId: "1980000301",
+      leaseId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    })).toThrow();
+  });
+
+  it("accepts only classified detail failures", () => {
+    const command = {
+      type: "DETAIL_FAILED",
+      code: "job_unavailable",
+      jobId: "1980000301",
+      leaseId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      error: "猎聘职位已暂停招聘或不可用"
+    } as const;
+    expect(decodeRuntimeRequest(command)).toEqual(command);
+    expect(() => decodeRuntimeRequest({ ...command, code: "arbitrary_page_error" })).toThrow();
+    const { code: _code, ...withoutCode } = command;
+    expect(() => decodeRuntimeRequest(withoutCode)).toThrow();
+  });
+
   it("accepts only strict reviewed-send identities without page-supplied content", () => {
     const command = {
       type: "PREPARE_REVIEWED_SEND",

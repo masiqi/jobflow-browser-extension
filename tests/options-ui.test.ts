@@ -411,6 +411,55 @@ describe("resume profile interactions", () => {
     expect(chrome.tabs.create).not.toHaveBeenCalled();
   });
 
+  it("shows immediate progress and blocks duplicate review generation", async () => {
+    const state = appState(profile());
+    const opportunityId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    state.opportunities = [{
+      id: opportunityId,
+      userId: state.auth.userId!,
+      platform: "liepin",
+      platformJobId: "1980000310",
+      canonicalUrl: "https://www.liepin.com/a/1980000310.shtml",
+      title: "合成复核职位",
+      company: "合成科技",
+      location: "北京",
+      salary: "30-50k",
+      experience: "3-5年",
+      education: "本科",
+      cardText: "合成职位卡片",
+      description: "岗位职责：负责合成智能体平台研发。",
+      status: "review_required",
+      latestReason: "需要用户确认经验年限",
+      firstSeenAt: "2026-09-11T00:00:00.000Z",
+      lastSeenAt: "2026-09-11T00:00:01.000Z"
+    }];
+    let releaseGeneration!: () => void;
+    const pendingGeneration = new Promise<void>((resolve) => {
+      releaseGeneration = resolve;
+    });
+    const sendMessage = vi.fn(async (request: { type: string }) => {
+      if (request.type === "GET_APP_STATE") return { ok: true, data: state };
+      if (request.type === "REVIEW_DECISION") await pendingGeneration;
+      return { ok: true };
+    });
+    vi.stubGlobal("chrome", { runtime: { sendMessage }, tabs: { create: vi.fn() } });
+
+    await import("../src/options");
+    await vi.waitFor(() => expect(document.querySelector('[data-action="review-continue"]')).not.toBeNull());
+    const button = document.querySelector('[data-action="review-continue"]') as HTMLButtonElement;
+    button.click();
+
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("aria-busy")).toBe("true");
+    expect(button.textContent).toContain("正在生成");
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(sendMessage.mock.calls.filter(([request]) => request.type === "REVIEW_DECISION")).toHaveLength(1);
+
+    releaseGeneration();
+    await vi.waitFor(() => expect(document.querySelector('[data-action="review-continue"]')?.textContent).toBe("继续生成"));
+    expect(document.querySelector("#toast")?.textContent).toContain("已转入人工确认");
+  });
+
   it("requires prepare before a reviewed live send confirmation and blocks duplicates", async () => {
     const state = appState(profile());
     const opportunityId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
@@ -466,7 +515,10 @@ describe("resume profile interactions", () => {
     expect(document.querySelector('[data-action="confirm-reviewed-send"]')).toBeNull();
     const prepare = document.querySelector('[data-action="prepare-reviewed-send"]') as HTMLButtonElement;
     prepare.click();
+    expect(prepare.disabled).toBe(true);
+    expect(prepare.textContent).toContain("正在检查");
     await vi.waitFor(() => expect(document.querySelector("#reviewedSendStatus")?.textContent).toContain("正在检查"));
+    await vi.waitFor(() => expect(sendMessage.mock.calls.filter(([request]) => request.type === "PREPARE_REVIEWED_SEND")).toHaveLength(1));
     prepare.click();
     expect(sendMessage.mock.calls.filter(([request]) => request.type === "PREPARE_REVIEWED_SEND")).toHaveLength(1);
 

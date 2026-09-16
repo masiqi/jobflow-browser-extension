@@ -511,7 +511,18 @@ export async function recordReviewedDeliveryAttempt(input: {
     target_draft_sha256: input.draftSha256 ?? null,
     target_reservation_id: input.reservationId ?? null
   });
-  if (error) throw new Error("记录投递进度失败");
+  if (error) {
+    const safeCodes = [
+      "invalid_delivery_attempt",
+      "invalid_delivery_evidence",
+      "delivery_not_found",
+      "stale_delivery_revision",
+      "stale_delivery_hash",
+      "delivery_reservation_not_found"
+    ];
+    const safeCode = safeCodes.find((code) => error.message.includes(code));
+    throw new Error("记录投递进度失败" + (safeCode ? "（" + safeCode + "）" : ""));
+  }
   return mapDeliveryRecord(deliveryRecordRowSchema.parse(data));
 }
 

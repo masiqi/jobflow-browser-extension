@@ -1,6 +1,19 @@
 import { DEFAULT_SETTINGS, LEGACY_STORAGE_KEYS, STORAGE_KEYS } from "./defaults";
-import { automaticWriteThrottleSchema, batchRunSchema, extensionSettingsSchema, scanPreviewSchema } from "./domain/messages";
-import type { AutomaticWriteThrottle, BatchRun, ExtensionSettings, PlatformKey, ScanPreview } from "./types";
+import {
+  automaticWriteThrottleSchema,
+  batchRunSchema,
+  extensionSettingsSchema,
+  liepinNavigationThrottleSchema,
+  scanPreviewSchema
+} from "./domain/messages";
+import type {
+  AutomaticWriteThrottle,
+  BatchRun,
+  ExtensionSettings,
+  LiepinNavigationThrottle,
+  PlatformKey,
+  ScanPreview
+} from "./types";
 
 export async function loadSettings(): Promise<ExtensionSettings> {
   const value: unknown = (await chrome.storage.local.get(STORAGE_KEYS.settings))[STORAGE_KEYS.settings];
@@ -34,6 +47,25 @@ export async function saveAutomaticWriteThrottle(throttle: AutomaticWriteThrottl
 
 export async function clearAutomaticWriteThrottle(): Promise<void> {
   await chrome.storage.local.remove(STORAGE_KEYS.automaticWriteThrottle);
+}
+
+export async function getLiepinNavigationThrottle(
+  ownerId: string,
+  platform: PlatformKey
+): Promise<LiepinNavigationThrottle | null> {
+  const value: unknown = (await chrome.storage.local.get(STORAGE_KEYS.liepinNavigationThrottle))[STORAGE_KEYS.liepinNavigationThrottle];
+  const parsed = liepinNavigationThrottleSchema.safeParse(value);
+  if (!parsed.success) return null;
+  return parsed.data.ownerId === ownerId && parsed.data.platform === platform ? parsed.data : null;
+}
+
+export async function saveLiepinNavigationThrottle(throttle: LiepinNavigationThrottle): Promise<void> {
+  const parsed = liepinNavigationThrottleSchema.parse(throttle);
+  await chrome.storage.local.set({ [STORAGE_KEYS.liepinNavigationThrottle]: parsed });
+}
+
+export async function clearLiepinNavigationThrottle(): Promise<void> {
+  await chrome.storage.local.remove(STORAGE_KEYS.liepinNavigationThrottle);
 }
 
 interface StoredKey {
@@ -116,7 +148,8 @@ export async function ensureDeviceOwner(userId: string): Promise<void> {
     STORAGE_KEYS.settings,
     STORAGE_KEYS.run,
     STORAGE_KEYS.scanPreview,
-    STORAGE_KEYS.automaticWriteThrottle
+    STORAGE_KEYS.automaticWriteThrottle,
+    STORAGE_KEYS.liepinNavigationThrottle
   ]);
   await chrome.storage.local.set({ [STORAGE_KEYS.deviceOwner]: userId });
 }
@@ -128,6 +161,7 @@ export async function clearDeviceOwner(): Promise<void> {
     STORAGE_KEYS.settings,
     STORAGE_KEYS.run,
     STORAGE_KEYS.scanPreview,
-    STORAGE_KEYS.automaticWriteThrottle
+    STORAGE_KEYS.automaticWriteThrottle,
+    STORAGE_KEYS.liepinNavigationThrottle
   ]);
 }

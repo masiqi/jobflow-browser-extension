@@ -1,5 +1,5 @@
 begin;
-select plan(11);
+select plan(13);
 
 insert into auth.users (
   id, instance_id, aud, role, email, encrypted_password,
@@ -9,10 +9,11 @@ insert into auth.users (
   ('00000000-0000-0000-0000-000000000012', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'detail-beta@example.invalid', 'x', '{}'::jsonb, '{}'::jsonb, now(), now());
 
 insert into public.job_opportunities (
-  id, user_id, platform, platform_job_id, canonical_url, title
+  id, user_id, platform, platform_job_id, canonical_url, title, current_status
 ) values
-  ('00000000-0000-4000-8000-000000000021', '00000000-0000-0000-0000-000000000011', 'liepin', 'detail-job-1', 'https://www.liepin.com/job/11.shtml', 'Synthetic detail role'),
-  ('00000000-0000-4000-8000-000000000022', '00000000-0000-0000-0000-000000000012', 'liepin', 'detail-job-2', 'https://www.liepin.com/job/12.shtml', 'Other synthetic detail role');
+  ('00000000-0000-4000-8000-000000000021', '00000000-0000-0000-0000-000000000011', 'liepin', 'detail-job-1', 'https://www.liepin.com/job/11.shtml', 'Synthetic detail role', 'discovered'),
+  ('00000000-0000-4000-8000-000000000022', '00000000-0000-0000-0000-000000000012', 'liepin', 'detail-job-2', 'https://www.liepin.com/job/12.shtml', 'Other synthetic detail role', 'discovered'),
+  ('00000000-0000-4000-8000-000000000023', '00000000-0000-0000-0000-000000000011', 'liepin', 'detail-job-3', 'https://www.liepin.com/job/13.shtml', 'Synthetic drafted detail role', 'draft_ready');
 
 set local role authenticated;
 set local request.jwt.claim.sub = '00000000-0000-0000-0000-000000000011';
@@ -66,6 +67,20 @@ select is(
     where request_id = '00000000-0000-4000-8000-000000000111'),
   1::bigint,
   'idempotent detail request creates one event'
+);
+select lives_ok(
+  $$select public.record_job_details(
+    '00000000-0000-4000-8000-000000000023',
+    '00000000-0000-4000-8000-000000000115',
+    '{"platform":"liepin","jobId":"detail-job-3","description":"Synthetic refreshed detail for a drafted opportunity.","recruiter":"","recruiterTitle":""}'::jsonb,
+    'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+  )$$,
+  'detail refresh accepts an already drafted opportunity'
+);
+select is(
+  (select current_status from public.job_opportunities where platform_job_id = 'detail-job-3'),
+  'draft_ready',
+  'detail refresh does not regress a drafted projection to extracting'
 );
 select throws_ok(
   $$select public.record_job_details(

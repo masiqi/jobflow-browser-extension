@@ -3,17 +3,19 @@ import { DEFAULT_SETTINGS, STORAGE_KEYS } from "../src/defaults";
 import {
   ensureDeviceOwner,
   getAutomaticWriteThrottle,
+  getLiepinNavigationThrottle,
   getByokKey,
   getRun,
   getScanPreview,
   loadSettings,
   saveAutomaticWriteThrottle,
+  saveLiepinNavigationThrottle,
   saveRun,
   saveScanPreview,
   saveSettings,
   setByokKey
 } from "../src/storage";
-import type { AutomaticWriteThrottle, BatchRun, ScanPreview } from "../src/types";
+import type { AutomaticWriteThrottle, BatchRun, LiepinNavigationThrottle, ScanPreview } from "../src/types";
 
 function storageArea(values: Map<string, unknown>) {
   return {
@@ -61,6 +63,13 @@ describe("device-owned extension storage", () => {
       scheduledDelaySeconds: 17,
       nextWriteEligibleAt: "2026-09-12T00:00:17.000Z"
     });
+    await saveLiepinNavigationThrottle({
+      ownerId: "user-a",
+      platform: "liepin",
+      lastNavigationStartedAt: "2026-09-12T00:00:00.000Z",
+      scheduledDelaySeconds: 20,
+      nextNavigationEligibleAt: "2026-09-12T00:00:20.000Z"
+    });
     await setByokKey("synthetic-key", false, "user-a");
     local.set(STORAGE_KEYS.run, { id: "old-run" });
     local.set(STORAGE_KEYS.scanPreview, { sourceUrl: "old-preview" });
@@ -71,6 +80,7 @@ describe("device-owned extension storage", () => {
     expect(local.has(STORAGE_KEYS.run)).toBe(false);
     expect(local.has(STORAGE_KEYS.scanPreview)).toBe(false);
     expect(await getAutomaticWriteThrottle("user-b", "liepin")).toBeNull();
+    expect(await getLiepinNavigationThrottle("user-b", "liepin")).toBeNull();
     expect(await getByokKey("user-b")).toBe("");
     expect(await loadSettings()).toEqual(DEFAULT_SETTINGS);
   });
@@ -181,5 +191,22 @@ describe("device-owned extension storage", () => {
 
     local.set(STORAGE_KEYS.automaticWriteThrottle, { ...throttle, scheduledDelaySeconds: 601 });
     expect(await getAutomaticWriteThrottle("user-a", "liepin")).toBeNull();
+  });
+
+  it("persists only the current owner's validated Liepin navigation throttle", async () => {
+    const throttle: LiepinNavigationThrottle = {
+      ownerId: "user-a",
+      platform: "liepin",
+      lastNavigationStartedAt: "2026-09-12T00:00:00.000Z",
+      scheduledDelaySeconds: 20,
+      nextNavigationEligibleAt: "2026-09-12T00:00:20.000Z"
+    };
+    await saveLiepinNavigationThrottle(throttle);
+
+    expect(await getLiepinNavigationThrottle("user-a", "liepin")).toEqual(throttle);
+    expect(await getLiepinNavigationThrottle("user-b", "liepin")).toBeNull();
+
+    local.set(STORAGE_KEYS.liepinNavigationThrottle, { ...throttle, scheduledDelaySeconds: 601 });
+    expect(await getLiepinNavigationThrottle("user-a", "liepin")).toBeNull();
   });
 });

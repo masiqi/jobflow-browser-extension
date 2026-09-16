@@ -10,7 +10,8 @@
     "sidePanel"
   ],
   "host_permissions": [
-    "https://*.liepin.com/*"
+    "https://*.liepin.com/*",
+    "http://127.0.0.1:54321/*"
   ],
   "background": {
     "service_worker": "background.js"

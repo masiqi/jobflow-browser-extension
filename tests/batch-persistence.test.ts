@@ -243,7 +243,9 @@ async function loadBackground(): Promise<void> {
     tabs: {
       create: vi.fn(),
       query: vi.fn(async () => []),
+      reload: vi.fn(async () => undefined),
       remove: vi.fn(async () => undefined),
+      update: vi.fn(async () => undefined),
       get: vi.fn(async () => undefined),
       sendMessage: vi.fn()
     }
@@ -273,6 +275,17 @@ async function dispatchRuntime(
   return new Promise((resolve) => {
     runtimeListener?.(message, sender, (response) => resolve(response as { ok: boolean; data?: unknown; error?: string }));
   });
+}
+
+function liepinContentSender(
+  overrides: Partial<chrome.runtime.MessageSender> = {}
+): chrome.runtime.MessageSender {
+  return {
+    id: "jobflow-extension-id",
+    url: "https://www.liepin.com/a/1980000401.shtml",
+    tab: { id: 101 } as chrome.tabs.Tab,
+    ...overrides
+  } as chrome.runtime.MessageSender;
 }
 
 function automaticRunningBatch(status: BatchRun["items"][number]["status"] = "opening"): BatchRun {
@@ -381,6 +394,77 @@ describe("batch run persistence", () => {
     expect(parsed.data?.items[0]?.candidate).not.toHaveProperty("description");
     expect(parsed.data?.items[0]?.candidate).not.toHaveProperty("recruiter");
     expect(parsed.data?.items[0]?.candidate).not.toHaveProperty("recruiterTitle");
+  });
+
+  it("returns the current extension-owned detail lease for an exact Liepin content handshake", async () => {
+    const response = await dispatchRuntime({
+      type: "DETAIL_PAGE_READY",
+      jobId: "1980000401"
+    }, liepinContentSender());
+
+    expect(response).toEqual({ ok: true, data: leaseId });
+    expect(backend.invokeModelGateway).not.toHaveBeenCalled();
+    expect(backend.reserveReviewedDeliveryQuota).not.toHaveBeenCalled();
+    expect(chrome.tabs.sendMessage).not.toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.objectContaining({ type: "CONTENT_REVIEWED_SEND_EXECUTE" })
+    );
+  });
+
+  it("returns the current lease to an exact Liepin risk redirect backurl", async () => {
+    const response = await dispatchRuntime({
+      type: "DETAIL_PAGE_READY",
+      jobId: "1980000401"
+    }, liepinContentSender({
+      url: "https://safe.liepin.com/v/intercept/verifysms?backurl=https%3A%2F%2Fwww.liepin.com%2Fjob%2F1980000401.shtml"
+    }));
+
+    expect(response).toEqual({ ok: true, data: leaseId });
+    expect(backend.invokeModelGateway).not.toHaveBeenCalled();
+    expect(backend.reserveReviewedDeliveryQuota).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-current or untrusted detail lease handshakes without side effects", async () => {
+    const cases: Array<{
+      label: string;
+      sender: chrome.runtime.MessageSender;
+      jobId: string;
+      mutateRun?: (run: BatchRun) => BatchRun;
+    }> = [
+      { label: "wrong tab", sender: liepinContentSender({ tab: { id: 999 } as chrome.tabs.Tab }), jobId: "1980000401" },
+      { label: "wrong job", sender: liepinContentSender(), jobId: "1980000999" },
+      { label: "wrong origin", sender: liepinContentSender({ url: "https://example.invalid/a/1980000401.shtml" }), jobId: "1980000401" },
+      { label: "options caller", sender: { id: "jobflow-extension-id", url: "chrome-extension://jobflow-extension-id/options.html" } as chrome.runtime.MessageSender, jobId: "1980000401" },
+      {
+        label: "cancelled run",
+        sender: liepinContentSender(),
+        jobId: "1980000401",
+        mutateRun: (run) => ({ ...run, status: "cancelled" })
+      },
+      {
+        label: "historical item",
+        sender: liepinContentSender(),
+        jobId: "1980000401",
+        mutateRun: (run) => ({ ...run, currentIndex: 1 })
+      }
+    ];
+
+    for (const testCase of cases) {
+      vi.clearAllMocks();
+      localData[STORAGE_KEYS.run] = testCase.mutateRun ? testCase.mutateRun(runningBatch()) : runningBatch();
+      const response = await dispatchRuntime({
+        type: "DETAIL_PAGE_READY",
+        jobId: testCase.jobId
+      }, testCase.sender);
+
+      expect(response, testCase.label).toEqual({ ok: true, data: null });
+      expect(backend.invokeModelGateway).not.toHaveBeenCalled();
+      expect(backend.reserveReviewedDeliveryQuota).not.toHaveBeenCalled();
+      expect(chrome.tabs.sendMessage).not.toHaveBeenCalledWith(
+        expect.any(Number),
+        expect.objectContaining({ type: "CONTENT_REVIEWED_SEND_EXECUTE" })
+      );
+    }
   });
 
   it("persists an excluded first item without blocking the second queued item", async () => {
@@ -564,11 +648,110 @@ describe("batch run persistence", () => {
     expect(parsed.items[0]?.draftSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(backend.reserveReviewedDeliveryQuota).toHaveBeenCalledOnce();
     expect(backend.markReviewedDeliveryWriteStarted).toHaveBeenCalledOnce();
+    expect(backend.recordReviewedDeliveryAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      eventKind: "delivery_confirmed",
+      evidenceCode: "automatic_batch_authorized",
+      evidence: { source: "sidepanel_batch" }
+    }));
     expect(localData[STORAGE_KEYS.automaticWriteThrottle]).toMatchObject({
       ownerId: userId,
       platform: "liepin",
       scheduledDelaySeconds: 5
     });
+  });
+
+  it("names the missing application evidence when greeting evidence is verified", async () => {
+    const run = automaticRunningBatch("delivery_ready");
+    run.items[0]!.draftSha256 = await sourceHash(draft().currentText);
+    localData[STORAGE_KEYS.run] = run;
+    localData[STORAGE_KEYS.settings] = settings({}, {
+      executionPolicy: "automatic_send",
+      model: { ...DEFAULT_SETTINGS.model, route: "managed" },
+      automaticSendDelayMinSeconds: 5,
+      automaticSendDelayMaxSeconds: 5
+    });
+    backend.listDrafts.mockResolvedValue([draft()]);
+    backend.listOpportunities.mockResolvedValue([{ ...opportunity(), status: "draft_ready" }]);
+    let latestDelivery = delivery();
+    backend.recordReviewedDeliveryAttempt.mockImplementation(async (input: { eventKind: string }) => {
+      if (input.eventKind === "application_attempted") {
+        latestDelivery = delivery({
+          applicationStatus: "attempted",
+          greetingStatus: "pending",
+          overallStatus: "in_progress",
+          latestReason: "正式投递已尝试，尚未取得独立平台证据"
+        });
+      }
+      if (input.eventKind === "greeting_attempted") {
+        latestDelivery = delivery({
+          applicationStatus: "attempted",
+          greetingStatus: "attempted",
+          overallStatus: "in_progress",
+          latestReason: "招呼语已尝试，尚未取得独立平台证据"
+        });
+      }
+      if (input.eventKind === "greeting_verified") {
+        latestDelivery = delivery({
+          applicationStatus: "attempted",
+          greetingStatus: "verified",
+          overallStatus: "partial",
+          latestReason: "招呼语已从猎聘页面验证"
+        });
+      }
+      return latestDelivery;
+    });
+    (chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (_tabId: number, message: { type?: string }) => {
+      if (message.type === "CONTENT_REVIEWED_SEND_PREFLIGHT") {
+        return { ok: true, platformJobId: "1980000401", resumeMode: "platform_default", actionTier: "primary" };
+      }
+      if (message.type === "CONTENT_REVIEWED_SEND_EXECUTE") {
+        return {
+          ok: false,
+          application: "attempted",
+          greeting: "verified",
+          evidenceCodes: ["native_action_attempted", "outbound_greeting_exact_match"]
+        };
+      }
+      return undefined;
+    });
+
+    alarmListener?.({ name: "jobflow:queue", scheduledTime: Date.now() } as chrome.alarms.Alarm);
+    await vi.waitFor(() => expect(batchRunSchema.parse(localData[STORAGE_KEYS.run]).status).toBe("paused"));
+
+    const paused = batchRunSchema.parse(localData[STORAGE_KEYS.run]);
+    expect(paused.items[0]).toMatchObject({ status: "delivery_partial", blockerCode: "component_unverified" });
+    expect(paused.pauseReason).toBe("正式投递已尝试，尚未取得独立平台证据；招呼语已从猎聘页面验证");
+  });
+
+  it("recovers an extracting projection when the exact automatic draft identity still exists", async () => {
+    const run = automaticRunningBatch("delivery_ready");
+    run.items[0]!.draftSha256 = await sourceHash(draft().currentText);
+    localData[STORAGE_KEYS.run] = run;
+    localData[STORAGE_KEYS.settings] = settings({}, {
+      executionPolicy: "automatic_send",
+      model: { ...DEFAULT_SETTINGS.model, route: "managed" }
+    });
+    backend.listDrafts.mockResolvedValue([draft()]);
+    backend.listOpportunities.mockResolvedValue([{ ...opportunity(), status: "extracting" }]);
+    (chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (_tabId: number, message: { type?: string }) => {
+      if (message.type === "CONTENT_REVIEWED_SEND_PREFLIGHT") {
+        return { ok: true, platformJobId: "1980000401", resumeMode: "platform_default", actionTier: "primary" };
+      }
+      if (message.type === "CONTENT_REVIEWED_SEND_EXECUTE") {
+        return { ok: true, application: "verified", greeting: "verified", evidenceCodes: ["application_status_verified", "outbound_greeting_exact_match"] };
+      }
+      return undefined;
+    });
+
+    alarmListener?.({ name: "jobflow:queue", scheduledTime: Date.now() } as chrome.alarms.Alarm);
+
+    await vi.waitFor(() => expect(batchRunSchema.parse(localData[STORAGE_KEYS.run]).status).toBe("completed"));
+    expect(backend.prepareReviewedDelivery).toHaveBeenCalledWith(
+      opportunityId,
+      "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      await sourceHash(draft().currentText)
+    );
+    expect(backend.markReviewedDeliveryWriteStarted).toHaveBeenCalledOnce();
   });
 
   it("pauses an automatic batch before quota when final preflight is blocked", async () => {
@@ -643,10 +826,11 @@ describe("batch run persistence", () => {
 
     const automaticResponse = await dispatchRuntime({
       type: "DETAIL_FAILED",
+      code: "dom_timeout",
       jobId: "1980000401",
       leaseId,
       error: "详情页读取超时"
-    }, {} as chrome.runtime.MessageSender);
+    }, liepinContentSender());
 
     expect(automaticResponse).toEqual({ ok: true });
     const automatic = batchRunSchema.parse(localData[STORAGE_KEYS.run]);
@@ -666,10 +850,11 @@ describe("batch run persistence", () => {
     localData[STORAGE_KEYS.run] = runningBatch();
     const reviewedResponse = await dispatchRuntime({
       type: "DETAIL_FAILED",
+      code: "dom_timeout",
       jobId: "1980000401",
       leaseId,
       error: "详情页读取超时"
-    }, {} as chrome.runtime.MessageSender);
+    }, liepinContentSender());
 
     expect(reviewedResponse).toEqual({ ok: true });
     const reviewed = batchRunSchema.parse(localData[STORAGE_KEYS.run]);
@@ -679,6 +864,146 @@ describe("batch run persistence", () => {
       failedCount: 1
     });
     expect(reviewed.items[0]).toMatchObject({ status: "failed" });
+  });
+
+  it("keeps and activates an exact risk-verification tab when automatic detail reading is blocked", async () => {
+    localData[STORAGE_KEYS.run] = automaticRunningBatch("opening");
+
+    const response = await dispatchRuntime({
+      type: "DETAIL_FAILED",
+      code: "risk_control",
+      jobId: "1980000401",
+      leaseId,
+      error: "猎聘详情页需要安全验证"
+    }, liepinContentSender({
+      url: "https://safe.liepin.com/intercept/user/dispatch?backurl=https%3A%2F%2Fwww.liepin.com%2Fjob%2F1980000401.shtml"
+    }));
+
+    expect(response).toEqual({ ok: true });
+    const paused = batchRunSchema.parse(localData[STORAGE_KEYS.run]);
+    expect(paused).toMatchObject({
+      status: "paused",
+      currentIndex: 0,
+      pauseReason: "猎聘详情页需要安全验证"
+    });
+    expect(paused.items[0]).toMatchObject({
+      status: "blocked",
+      blockerPhase: "pre_write",
+      blockerCode: "risk_control"
+    });
+    expect(paused.items[0]?.tabId).toBeUndefined();
+    expect(paused.items[0]?.leaseId).toBeUndefined();
+    expect(chrome.tabs.update).toHaveBeenCalledWith(101, { active: true });
+    expect(chrome.tabs.remove).not.toHaveBeenCalledWith(101);
+    expect(backend.reserveReviewedDeliveryQuota).not.toHaveBeenCalled();
+  });
+
+  it("waits for a persisted Liepin navigation cooldown before opening another detail", async () => {
+    const run = runningBatch();
+    run.items[0] = {
+      ...run.items[0]!,
+      status: "queued",
+      tabId: undefined,
+      leaseId: undefined
+    };
+    localData[STORAGE_KEYS.run] = run;
+    const nextNavigationEligibleAt = new Date(Date.now() + 30_000).toISOString();
+    localData[STORAGE_KEYS.liepinNavigationThrottle] = {
+      ownerId: userId,
+      platform: "liepin",
+      lastNavigationStartedAt: new Date().toISOString(),
+      scheduledDelaySeconds: 30,
+      nextNavigationEligibleAt
+    };
+
+    alarmListener?.({ name: "jobflow:queue", scheduledTime: Date.now() } as chrome.alarms.Alarm);
+
+    await vi.waitFor(() => expect(batchRunSchema.parse(localData[STORAGE_KEYS.run]).items[0]?.status).toBe("waiting_navigation"));
+    const waiting = batchRunSchema.parse(localData[STORAGE_KEYS.run]);
+    expect(waiting.nextNavigationEligibleAt).toBe(nextNavigationEligibleAt);
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+    expect(chrome.alarms.create).toHaveBeenCalledWith("jobflow:queue", {
+      when: new Date(nextNavigationEligibleAt).getTime()
+    });
+    expect(localData[STORAGE_KEYS.liepinNavigationThrottle]).toMatchObject({
+      nextNavigationEligibleAt
+    });
+  });
+
+  it("persists the next navigation cooldown before opening the first detail", async () => {
+    const run = runningBatch();
+    run.items[0] = {
+      ...run.items[0]!,
+      status: "queued",
+      tabId: undefined,
+      leaseId: undefined
+    };
+    localData[STORAGE_KEYS.run] = run;
+    (chrome.tabs.create as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 401 });
+
+    alarmListener?.({ name: "jobflow:queue", scheduledTime: Date.now() } as chrome.alarms.Alarm);
+
+    await vi.waitFor(() => expect(chrome.tabs.create).toHaveBeenCalledOnce());
+    const throttle = localData[STORAGE_KEYS.liepinNavigationThrottle] as {
+      scheduledDelaySeconds: number;
+      nextNavigationEligibleAt: string;
+    };
+    expect(throttle.scheduledDelaySeconds).toBeGreaterThanOrEqual(15);
+    expect(throttle.scheduledDelaySeconds).toBeLessThanOrEqual(30);
+    expect(new Date(throttle.nextNavigationEligibleAt).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it("records a permanently unavailable job and continues an automatic batch", async () => {
+    const run = runningBatch();
+    run.executionPolicy = "automatic_send";
+    localData[STORAGE_KEYS.run] = run;
+
+    const response = await dispatchRuntime({
+      type: "DETAIL_FAILED",
+      code: "job_unavailable",
+      jobId: "1980000401",
+      leaseId,
+      error: "猎聘职位已暂停招聘或不可用"
+    }, liepinContentSender());
+
+    expect(response).toEqual({ ok: true });
+    await vi.waitFor(() => expect(batchRunSchema.parse(localData[STORAGE_KEYS.run]).currentIndex).toBe(1));
+    const parsed = batchRunSchema.parse(localData[STORAGE_KEYS.run]);
+    expect(parsed).toMatchObject({ status: "running", currentIndex: 1, failedCount: 1 });
+    expect(parsed.items[0]).toMatchObject({
+      status: "failed",
+      error: "猎聘职位已暂停招聘或不可用"
+    });
+    expect(backend.invokeModelGateway).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "record_failure",
+      payload: expect.objectContaining({ errorCode: "猎聘职位已暂停招聘或不可用" })
+    }), undefined);
+    expect(backend.reserveReviewedDeliveryQuota).not.toHaveBeenCalled();
+  });
+
+  it("keeps a quickly resolved detail tab for a minimum dwell before closing", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-14T00:00:00.000Z"));
+    const run = automaticRunningBatch("opening");
+    run.items[0]!.startedAt = "2026-09-14T00:00:00.000Z";
+    localData[STORAGE_KEYS.run] = run;
+    try {
+      const response = dispatchRuntime({
+        type: "DETAIL_FAILED",
+        code: "job_unavailable",
+        jobId: "1980000401",
+        leaseId,
+        error: "猎聘职位已暂停招聘或不可用"
+      }, liepinContentSender());
+
+      await vi.advanceTimersByTimeAsync(7_999);
+      expect(chrome.tabs.remove).not.toHaveBeenCalledWith(101);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(response).resolves.toEqual({ ok: true });
+      expect(chrome.tabs.remove).toHaveBeenCalledWith(101);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("resumes a pre-draft automatic blocker by reopening details for extraction", async () => {
@@ -769,9 +1094,129 @@ describe("batch run persistence", () => {
 
     expect(modelOperations()).not.toContain("evaluate_opportunity");
     expect(modelOperations()).not.toContain("generate_greeting");
-    expect(backend.recordJobDetails).toHaveBeenCalled();
+    expect(backend.recordJobDetails).not.toHaveBeenCalled();
     expect(backend.markReviewedDeliveryWriteStarted).toHaveBeenCalledOnce();
     expect(resumed.items[0]?.status).toBe("delivery_succeeded");
+  });
+
+  it("opens a missing reviewed-send detail tab and waits for its content preflight", async () => {
+    const draftSha256 = await sourceHash(draft().currentText);
+    localData[STORAGE_KEYS.settings] = settings({}, {
+      executionPolicy: "reviewed_send",
+      model: { ...DEFAULT_SETTINGS.model, route: "managed" }
+    });
+    backend.listDrafts.mockResolvedValue([draft()]);
+    backend.listOpportunities.mockResolvedValue([{ ...opportunity(), status: "draft_ready" }]);
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (chrome.tabs.create as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 202,
+      url: "https://www.liepin.com/job/1980000401.shtml"
+    });
+    let preflightAttempts = 0;
+    (chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      preflightAttempts += 1;
+      if (preflightAttempts === 1) throw new Error("Receiving end does not exist");
+      return { ok: true, platformJobId: "1980000401", resumeMode: "platform_default", actionTier: "primary" };
+    });
+    const sender = {
+      id: "jobflow-extension-id",
+      url: "chrome-extension://jobflow-extension-id/options.html"
+    } as chrome.runtime.MessageSender;
+
+    const response = await dispatchRuntime({
+      type: "PREPARE_REVIEWED_SEND",
+      opportunityId,
+      draftRevisionId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      draftSha256
+    }, sender);
+
+    expect(response).toMatchObject({ ok: true });
+    expect(chrome.tabs.create).toHaveBeenCalledWith({
+      url: "https://www.liepin.com/job/1980000401.shtml",
+      active: false
+    });
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledTimes(2);
+    expect(backend.reserveReviewedDeliveryQuota).not.toHaveBeenCalled();
+    expect(backend.markReviewedDeliveryWriteStarted).not.toHaveBeenCalled();
+  });
+
+  it("reloads an exact existing detail tab once when its content context is stale", async () => {
+    const draftSha256 = await sourceHash(draft().currentText);
+    localData[STORAGE_KEYS.settings] = settings({}, {
+      executionPolicy: "reviewed_send",
+      model: { ...DEFAULT_SETTINGS.model, route: "managed" }
+    });
+    backend.listDrafts.mockResolvedValue([draft()]);
+    backend.listOpportunities.mockResolvedValue([{ ...opportunity(), status: "draft_ready" }]);
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([{
+      id: 201,
+      url: "https://www.liepin.com/job/1980000401.shtml"
+    }]);
+    let preflightAttempts = 0;
+    (chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      preflightAttempts += 1;
+      if (preflightAttempts === 1) throw new Error("Extension context invalidated");
+      return { ok: true, platformJobId: "1980000401", resumeMode: "platform_default", actionTier: "primary" };
+    });
+    const sender = {
+      id: "jobflow-extension-id",
+      url: "chrome-extension://jobflow-extension-id/options.html"
+    } as chrome.runtime.MessageSender;
+
+    const response = await dispatchRuntime({
+      type: "PREPARE_REVIEWED_SEND",
+      opportunityId,
+      draftRevisionId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      draftSha256
+    }, sender);
+
+    expect(response).toMatchObject({ ok: true });
+    expect(chrome.tabs.reload).toHaveBeenCalledOnce();
+    expect(chrome.tabs.reload).toHaveBeenCalledWith(201);
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("allows only one concurrent user-requested generation per opportunity", async () => {
+    const generation = deferred<unknown>();
+    localData[STORAGE_KEYS.settings] = settings({}, {
+      executionPolicy: "reviewed_send",
+      model: { ...DEFAULT_SETTINGS.model, route: "managed" }
+    });
+    backend.listResumeProfiles.mockResolvedValue([activeProfile()]);
+    backend.listOpportunities.mockResolvedValue([{
+      ...opportunity(),
+      status: "draft_ready",
+      description: "岗位职责：负责建设高可用任务平台和稳定性体系。"
+    }]);
+    backend.invokeModelGateway.mockImplementation(async (request: { operation: string }) => {
+      if (request.operation === "generate_greeting") return generation.promise;
+      return { ok: true };
+    });
+
+    const first = dispatchRuntime({
+      type: "REGENERATE_DRAFT",
+      opportunityId
+    }, {} as chrome.runtime.MessageSender);
+    const second = dispatchRuntime({
+      type: "REGENERATE_DRAFT",
+      opportunityId
+    }, {} as chrome.runtime.MessageSender);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(modelOperations().filter((operation) => operation === "generate_greeting")).toHaveLength(1);
+
+    generation.resolve({
+      ok: true,
+      result: {
+        greeting: draft().currentText,
+        jdEvidence: ["负责建设高可用任务平台"],
+        factIds: ["fact-1"]
+      }
+    });
+    const [firstResponse, secondResponse] = await Promise.all([first, second]);
+    expect(firstResponse).toEqual({ ok: true });
+    expect(secondResponse).toMatchObject({ ok: false, error: expect.stringContaining("正在生成") });
   });
 
   it("honors pause during model work and does not enter automatic delivery from a stale detail run", async () => {
@@ -1552,6 +1997,7 @@ describe("batch run persistence", () => {
     });
 
     await dispatchRuntime({ type: "RESUME_BATCH" }, {} as chrome.runtime.MessageSender);
+    alarmListener?.({ name: "jobflow:queue", scheduledTime: Date.now() } as chrome.alarms.Alarm);
     await vi.waitFor(() => expect(chrome.tabs.create).toHaveBeenCalledOnce());
     const lease = batchRunSchema.parse(localData[STORAGE_KEYS.run]).items[0]?.leaseId;
     expect(lease).toBeTypeOf("string");
