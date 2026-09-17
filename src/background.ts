@@ -277,7 +277,15 @@ async function scanCurrentTab(): Promise<ScanPreview> {
   if (typeof tab?.id !== "number" || !platform) {
     throw new Error("请在猎聘或智联招聘职位列表页扫描");
   }
-  const raw: unknown = await chrome.tabs.sendMessage(tab.id, { type: "CONTENT_SCAN" });
+  let raw: unknown;
+  try {
+    raw = await chrome.tabs.sendMessage(tab.id, { type: "CONTENT_SCAN" });
+  } catch (error) {
+    if (error instanceof Error && /receiving end does not exist/i.test(error.message)) {
+      throw new Error("当前页面尚未加载 JobFlow 内容脚本，请先 Reload 扩展，再刷新当前招聘列表页后重试");
+    }
+    throw error;
+  }
   const result = z.object({
     sourceUrl: z.string().url(),
     candidates: z.array(listCandidateSchema).max(500)

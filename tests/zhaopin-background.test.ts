@@ -149,3 +149,22 @@ it("scans a Zhaopin list through the shared background preview and storage path"
   });
   expect(backend.upsertCandidates).toHaveBeenCalledWith([candidate()]);
 });
+
+it("turns a stale content-script channel into an actionable scan error", async () => {
+  (chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+    new Error("Could not establish connection. Receiving end does not exist.")
+  );
+
+  const response = await new Promise<{ ok: boolean; data?: unknown; error?: string }>((resolve) => {
+    runtimeListener?.(
+      { type: "SCAN_CURRENT_TAB" },
+      { id: "jobflow-extension-id" } as chrome.runtime.MessageSender,
+      (value) => resolve(value as { ok: boolean; data?: unknown; error?: string })
+    );
+  });
+
+  expect(response).toMatchObject({
+    ok: false,
+    error: "当前页面尚未加载 JobFlow 内容脚本，请先 Reload 扩展，再刷新当前招聘列表页后重试"
+  });
+});
