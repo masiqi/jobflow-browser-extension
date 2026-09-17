@@ -247,7 +247,7 @@ async function main() {
     "- model-gateway 日志: " + logPath,
     "- dist 已用本地 PUBLISHABLE_KEY 构建（未使用 ANON/SECRET/SERVICE_ROLE key）",
     "",
-    "下一步：打开 chrome://extensions Reload JobFlow，然后完整刷新猎聘列表页；旧详情标签页请关闭后重新打开。",
+    "下一步：打开 chrome://extensions Reload JobFlow，然后完整刷新猎聘或智联招聘列表页；旧详情标签页请关闭后重新打开。",
     "该脚本不会执行 supabase db reset，因此不会删除本地账号、画像或职位记录。"
   ].join("\n"));
 }
