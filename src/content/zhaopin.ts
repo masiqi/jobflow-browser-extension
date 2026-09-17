@@ -7,6 +7,8 @@ import {
   zhaopinBlockedPageReason,
   zhaopinJobIdFromUrl,
   scanZhaopinList,
+  collectZhaopinDetailDiagnostics,
+  formatZhaopinDetailDiagnostics,
   type ZhaopinPageJob
 } from "../platforms/zhaopin";
 import { type DetailFailureCode } from "../domain/messages";
@@ -264,6 +266,7 @@ async function reportDetailFailure(code: DetailFailureCode, jobId: string, lease
 }
 
 async function reportLeasedDetail(): Promise<void> {
+  const captureStartedAt = Date.now();
   const isDetailPage = isZhaopinDetailPage();
   const blocked = detectZhaopinBlockedPage(document, location);
   if (!isDetailPage && !blocked) return;
@@ -272,11 +275,19 @@ async function reportLeasedDetail(): Promise<void> {
   const leaseId = await detailLeaseForCurrentPage();
   if (!leaseId) return;
   if (blocked) {
-    await reportDetailFailure(blocked, jobId, leaseId, zhaopinBlockedPageReason(blocked));
+    const diagnostics = formatZhaopinDetailDiagnostics(
+      collectZhaopinDetailDiagnostics(document, location.href, Date.now() - captureStartedAt)
+    );
+    console.warn("[JobFlow:zhaopin-detail-diagnostic]", diagnostics);
+    await reportDetailFailure(blocked, jobId, leaseId, (zhaopinBlockedPageReason(blocked) + "；诊断：" + diagnostics).slice(0, 500));
     return;
   }
   if (!isDetailPage) {
-    await reportDetailFailure("unexpected_redirect", jobId, leaseId, "智联招聘详情页跳转到无法识别的页面");
+    const diagnostics = formatZhaopinDetailDiagnostics(
+      collectZhaopinDetailDiagnostics(document, location.href, Date.now() - captureStartedAt)
+    );
+    console.warn("[JobFlow:zhaopin-detail-diagnostic]", diagnostics);
+    await reportDetailFailure("unexpected_redirect", jobId, leaseId, ("智联招聘详情页跳转到无法识别的页面；诊断：" + diagnostics).slice(0, 500));
     return;
   }
   await waitForPageReady();
@@ -288,6 +299,10 @@ async function reportLeasedDetail(): Promise<void> {
     }
     const job = extractZhaopinDetail();
     if (job) {
+      const diagnostics = formatZhaopinDetailDiagnostics(
+        collectZhaopinDetailDiagnostics(document, location.href, Date.now() - captureStartedAt)
+      );
+      console.info("[JobFlow:zhaopin-detail-diagnostic]", diagnostics);
       const result = await sendRuntimeMessage<unknown>({ type: "DETAIL_READY", job, leaseId });
       if (result.kind === "context_unavailable") return;
       if (result.kind === "transport_error") {
@@ -306,7 +321,11 @@ async function reportLeasedDetail(): Promise<void> {
     }
     await delay(1000);
   }
-  await reportDetailFailure("dom_timeout", jobId, leaseId, "详情 DOM 未在 30 秒内准备好");
+  const diagnostics = formatZhaopinDetailDiagnostics(
+    collectZhaopinDetailDiagnostics(document, location.href, Date.now() - captureStartedAt)
+  );
+  console.warn("[JobFlow:zhaopin-detail-diagnostic]", diagnostics);
+  await reportDetailFailure("dom_timeout", jobId, leaseId, ("详情 DOM 未在 30 秒内准备好；诊断：" + diagnostics).slice(0, 500));
 }
 
 async function mountConfiguredLauncher(): Promise<void> {

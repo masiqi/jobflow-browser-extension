@@ -117,10 +117,94 @@ export function isZhaopinDetailPage(location: LocationLike = window.location): b
 
 export type ZhaopinBlockedPage = "login_required" | "risk_control" | "job_unavailable";
 
+export interface ZhaopinDetailDiagnostics {
+  path: string;
+  readyState: string;
+  visibilityState: string;
+  elapsedMs: number;
+  bodyChars: number;
+  titleMatches: number;
+  descriptionMatches: number;
+  longDescriptionMatches: number;
+  hasDetailContent: boolean;
+  hasLoginMarker: boolean;
+  hasRiskMarker: boolean;
+}
+
+const ZHAOPIN_DETAIL_TITLE_SELECTORS = [
+  "h1.summary-planes__title",
+  ".job-header__title",
+  ".jobinfo__name",
+  ".job-detail__title",
+  "h1"
+] as const;
+
+const ZHAOPIN_DETAIL_DESCRIPTION_SELECTORS = [
+  ".describtion__detail",
+  ".describtion-card",
+  ".describtion-card__content",
+  ".seo-card__content",
+  ".job-description",
+  ".jobdescription",
+  ".job-detail__content",
+  ".job-detail-content",
+  "[class*='job-description']",
+  "[class*='jobdescription']",
+  "[class*='describ']"
+] as const;
+
 function hasZhaopinDetailContent(root: ParentNode): boolean {
   return Boolean(root.querySelector(
     "h1.summary-planes__title, .job-header__title, .jobinfo__name, .job-detail__title, .describtion-card, .job-description, .jobdescription"
   ));
+}
+
+export function collectZhaopinDetailDiagnostics(
+  root: ParentNode = document,
+  href = "",
+  elapsedMs = 0
+): ZhaopinDetailDiagnostics {
+  const body = root instanceof Document ? root.body : root.querySelector("body") || root;
+  const source = normalizeText(body.textContent || "").slice(0, 20_000);
+  const descriptionElements = ZHAOPIN_DETAIL_DESCRIPTION_SELECTORS.flatMap((selector) =>
+    [...root.querySelectorAll<HTMLElement>(selector)]
+  );
+  let path = "";
+  try {
+    path = new URL(href || (typeof location !== "undefined" ? location.href : "")).pathname.slice(0, 220);
+  } catch {
+    path = "";
+  }
+  const documentLike = root instanceof Document ? root : null;
+  return {
+    path,
+    readyState: documentLike?.readyState || "unknown",
+    visibilityState: documentLike?.visibilityState || "unknown",
+    elapsedMs: Math.max(0, Math.round(elapsedMs)),
+    bodyChars: source.length,
+    titleMatches: ZHAOPIN_DETAIL_TITLE_SELECTORS.reduce((count, selector) => count + root.querySelectorAll(selector).length, 0),
+    descriptionMatches: descriptionElements.length,
+    longDescriptionMatches: descriptionElements.filter((element) => elementText(element).length >= 20).length,
+    hasDetailContent: hasZhaopinDetailContent(root),
+    hasLoginMarker: /登录后查看|请先登录|立即登录|扫码登录|登录\/注册|验证码登录/.test(source),
+    hasRiskMarker: /安全验证|访问异常|操作频繁|风险提示|滑块验证|人机验证/.test(source)
+  };
+}
+
+export function formatZhaopinDetailDiagnostics(diagnostics: ZhaopinDetailDiagnostics): string {
+  return [
+    "path=" + diagnostics.path,
+    "ready=" + diagnostics.readyState,
+    "visibility=" + diagnostics.visibilityState,
+    "elapsedMs=" + diagnostics.elapsedMs,
+    "bodyChars=" + diagnostics.bodyChars,
+    "titleMatches=" + diagnostics.titleMatches,
+    "descriptionMatches=" + diagnostics.descriptionMatches,
+    "longDescriptionMatches=" + diagnostics.longDescriptionMatches,
+    "hasDetail=" + String(diagnostics.hasDetailContent),
+    "hasLogin=" + String(diagnostics.hasLoginMarker),
+    "hasRisk=" + String(diagnostics.hasRiskMarker)
+  ].join(" ").slice(0, 450);
 }
 
 export function detectZhaopinBlockedPage(
@@ -241,20 +325,7 @@ export function scanZhaopinList(
 }
 
 function descriptionFromSelectors(root: ParentNode): string {
-  const selectors = [
-    ".describtion__detail",
-    ".describtion-card",
-    ".describtion-card__content",
-    ".seo-card__content",
-    ".job-description",
-    ".jobdescription",
-    ".job-detail__content",
-    ".job-detail-content",
-    "[class*='job-description']",
-    "[class*='jobdescription']",
-    "[class*='describ']"
-  ];
-  const values = selectors.flatMap((selector) =>
+  const values = ZHAOPIN_DETAIL_DESCRIPTION_SELECTORS.flatMap((selector) =>
     [...root.querySelectorAll<HTMLElement>(selector)].map(elementText)
   ).filter((value) => value.length >= 20);
   return values.sort((left, right) => right.length - left.length)[0] || "";

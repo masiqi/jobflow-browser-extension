@@ -4,8 +4,10 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { detailJobSchema } from "../src/domain/messages";
 import {
   canonicalZhaopinJobUrl,
+  collectZhaopinDetailDiagnostics,
   detectZhaopinBlockedPage,
   extractZhaopinDetail,
+  formatZhaopinDetailDiagnostics,
   isZhaopinDetailPage,
   isZhaopinListPage,
   scanZhaopinList,
@@ -209,6 +211,24 @@ describe("Zhaopin detail extraction", () => {
     expect(detectZhaopinBlockedPage()).toBeNull();
     expect(extractZhaopinDetail(document, "https://www.zhaopin.com/jobdetail/CCL1501502560J40877030814.htm"))
       .toMatchObject({ title: "真实详情职位", jobId: "CCL1501502560J40877030814" });
+  });
+
+  it("formats bounded detail diagnostics without including page text", () => {
+    document.body.innerHTML = `
+      <h1 class="summary-planes__title">诊断职位</h1>
+      <section class="describtion-card"><div>这是一段足够长的合成职位描述，用于验证诊断只记录结构计数而不记录正文。</div></section>
+      <aside>验证码登录/注册 登录/注册</aside>`;
+    const formatted = formatZhaopinDetailDiagnostics(collectZhaopinDetailDiagnostics(
+      document,
+      "https://www.zhaopin.com/jobdetail/CCLdiagnosticJ001.htm?tracking=discarded#lease",
+      31_234
+    ));
+    expect(formatted).toContain("path=/jobdetail/CCLdiagnosticJ001.htm");
+    expect(formatted).toContain("titleMatches=2");
+    expect(formatted).toContain("longDescriptionMatches=");
+    expect(formatted).toContain("hasLogin=true");
+    expect(formatted).not.toContain("足够长的合成职位描述");
+    expect(formatted.length).toBeLessThanOrEqual(450);
   });
 
   it("classifies login, risk, and unavailable pages without trying to recover them", () => {

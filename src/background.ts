@@ -710,10 +710,60 @@ async function processNext(): Promise<void> {
         : "excluded";
     return finishItem(run, item, status, "已存在持久处理记录");
   }
+  if (run.platform === "zhaopin" && record.status === "failed" && record.description?.trim()) {
+    return processStoredZhaopinDetail(run, item, record);
+  }
   if (run.platform === "liepin" && !(await waitForLiepinNavigationSlot(run, item))) return;
   if (!(await openCurrentItemTab(run, item))) return;
   if (!item.leaseId) return finishItem(run, item, "failed", "详情标签页租约不可用");
   await saveOpeningRunAndDetailAlarm(run, item);
+}
+
+async function processStoredZhaopinDetail(
+  run: BatchRun,
+  item: BatchItem,
+  opportunity: OpportunityRecord
+): Promise<void> {
+  item.status = "extracting";
+  item.startedAt = now();
+  item.attempt += 1;
+  item.opportunityId = opportunity.id;
+  item.tabId = undefined;
+  item.leaseId = undefined;
+  await saveRun(run);
+  await notifyState();
+
+  try {
+    const settings = await loadSettings();
+    const profile = await activeProfile();
+    if (!profile) return finishItem(run, item, "review_required", "已启用画像不存在");
+    let job: DetailJob;
+    try {
+      job = detailJobFromOpportunity(opportunity);
+    } catch {
+      return finishItem(run, item, "failed", "已保存职位详情格式无效");
+    }
+    const result = await processPostDetail(opportunity.id, job, settings, profile, async (status) => {
+      if (run.executionPolicy === "automatic_send") {
+        await assertAutomaticRunStillWritable(run.id, item.candidate.jobId);
+      }
+      item.status = status;
+      await saveRun(run);
+      await notifyState();
+    });
+    const latestRun = await getRun();
+    if (run.executionPolicy === "automatic_send"
+      && latestRun?.id === run.id
+      && latestRun.status !== "running") {
+      return;
+    }
+    item.filter = result.filter;
+    item.suitability = result.suitability;
+    await finishItem(run, item, result.status, result.reason);
+  } catch (error) {
+    if (error instanceof DeliveryControlStoppedError) return;
+    await finishItem(run, item, "failed", error instanceof Error ? error.message : "处理失败");
+  }
 }
 
 async function processAutomaticDelivery(run: BatchRun, item: BatchItem): Promise<void> {
@@ -2004,7 +2054,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     if ((run?.status === "running" || run?.status === "paused")
       && item?.leaseId
       && detailAlarmName(run.id, item.leaseId) === alarm.name) {
-      await handleDetailFailure(run, item, "详情页读取超时", "dom_timeout");
+      const reason = item.candidate.platform === "zhaopin"
+        ? "详情页读取超时；智联招聘内容脚本未在后台等待窗口内上报"
+        : "详情页读取超时";
+      await handleDetailFailure(run, item, reason, "dom_timeout");
     }
   })().catch(reportAsyncError);
 });
