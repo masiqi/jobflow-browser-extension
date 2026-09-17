@@ -8,3 +8,4 @@ coverage/
 supabase/.branches/
 supabase/.temp/
 .artifacts/
+.firecrawl/
