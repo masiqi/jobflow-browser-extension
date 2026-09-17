@@ -36,6 +36,103 @@ describe("Zhaopin route and identity handling", () => {
 });
 
 describe("Zhaopin list extraction", () => {
+  it("extracts Vue-backed split-page cards without confusing the right detail panel for a list item", () => {
+    document.body.innerHTML = `
+      <main class="jobs-split-page">
+        <div class="job-list-panel">
+          <div class="job-card job-card--active"><div class="job-card__title-row"><span>当前职位</span></div></div>
+          <div class="job-card"><div class="job-card__title-row"><span>第二个职位</span></div></div>
+        </div>
+        <aside><a href="https://www.zhaopin.com/jobdetail/CCLdetailJ001.htm">查看更多职位信息</a></aside>
+      </main>`;
+    const cards = [...document.querySelectorAll<HTMLElement>(".job-card")];
+    Object.defineProperty(cards[0], "__vue__", {
+      value: {
+        _props: {
+          job: {
+            number: "CCL000000001J400000001",
+            name: "当前职位",
+            salary60: "20-30K",
+            education: "本科",
+            workingExp: "3-5年",
+            companyName: "第一合成公司",
+            workCity: "北京",
+            cityDistrict: "朝阳",
+            streetName: "麦子店",
+            positionUrl: "http://www.zhaopin.com/jobdetail/CCL000000001J400000001.htm"
+          }
+        }
+      }
+    });
+    Object.defineProperty(cards[1], "__vue__", {
+      value: {
+        _props: {
+          job: {
+            number: "CCL000000002J400000002",
+            name: "第二个职位",
+            salary60: "15-25K",
+            education: "硕士",
+            workingExp: "5年以上",
+            companyName: "第二合成公司",
+            workCity: "北京",
+            cityDistrict: "海淀",
+            streetName: "上地",
+            positionUrl: "http://www.zhaopin.com/jobdetail/CCL000000002J400000002.htm"
+          }
+        }
+      }
+    });
+
+    const items = scanZhaopinList();
+    expect(items).toHaveLength(2);
+    expect(items.map((item) => item.jobId)).toEqual([
+      "CCL000000001J400000001",
+      "CCL000000002J400000002"
+    ]);
+    expect(items[0]).toMatchObject({
+      title: "当前职位",
+      company: "第一合成公司",
+      location: "北京 朝阳 麦子店",
+      salary: "20-30K",
+      experience: "3-5年",
+      education: "本科"
+    });
+  });
+
+  it("merges page-world bridge records by card index", () => {
+    document.body.innerHTML = `
+      <main><div class="job-card"></div><div class="job-card"></div></main>`;
+    const items = scanZhaopinList(document, [
+      {
+        index: 0,
+        number: "CCLbridgeJ400000001",
+        name: "桥接职位一",
+        salary: "20-30K",
+        education: "本科",
+        experience: "3-5年",
+        company: "桥接公司一",
+        location: "北京 朝阳",
+        positionUrl: "http://www.zhaopin.com/jobdetail/CCLbridgeJ400000001.htm"
+      },
+      {
+        index: 1,
+        number: "CCLbridgeJ400000002",
+        name: "桥接职位二",
+        salary: "15-25K",
+        education: "硕士",
+        experience: "5年以上",
+        company: "桥接公司二",
+        location: "北京 海淀",
+        positionUrl: "http://www.zhaopin.com/jobdetail/CCLbridgeJ400000002.htm"
+      }
+    ]);
+    expect(items.map((item) => item.jobId)).toEqual([
+      "CCLbridgeJ400000001",
+      "CCLbridgeJ400000002"
+    ]);
+    expect(items[1]).toMatchObject({ title: "桥接职位二", company: "桥接公司二", education: "硕士" });
+  });
+
   it("reads current DOM cards, extracts semantic fields, and deduplicates by full ID", () => {
     document.body.innerHTML = `
       <main>

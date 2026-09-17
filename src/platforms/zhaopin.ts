@@ -3,6 +3,18 @@ import type { DetailJob, ListCandidate } from "../types";
 const ZHAOPIN_HOSTS = new Set(["www.zhaopin.com"]);
 type LocationLike = Pick<Location, "hostname" | "pathname">;
 
+export interface ZhaopinPageJob {
+  index: number;
+  number: string;
+  name: string;
+  salary: string;
+  education: string;
+  experience: string;
+  company: string;
+  location: string;
+  positionUrl: string;
+}
+
 function isZhaopinHost(hostname: string): boolean {
   return ZHAOPIN_HOSTS.has(hostname.toLowerCase());
 }
@@ -39,6 +51,44 @@ function cardLeafTexts(card: HTMLElement): string[] {
     .filter((element) => element.children.length === 0)
     .map(elementText)
     .filter(Boolean);
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function boundedValue(value: unknown, maxLength = 500): string {
+  if (typeof value !== "string" && typeof value !== "number") return "";
+  return normalizeText(String(value)).slice(0, maxLength);
+}
+
+function readPageJobFromCard(card: HTMLElement, index: number): ZhaopinPageJob | null {
+  try {
+    const host = card as HTMLElement & {
+      __vue__?: { _props?: { job?: unknown } };
+    };
+    const job = recordValue(host.__vue__?._props?.job);
+    if (!job) return null;
+    return {
+      index,
+      number: boundedValue(job.number, 128),
+      name: boundedValue(job.name, 300),
+      salary: boundedValue(job.salary60, 100),
+      education: boundedValue(job.education, 100),
+      experience: boundedValue(job.workingExp, 100),
+      company: boundedValue(job.companyName, 300),
+      location: [job.workCity, job.cityDistrict, job.streetName]
+        .map((value) => boundedValue(value, 80))
+        .filter(Boolean)
+        .join(" ")
+        .slice(0, 200),
+      positionUrl: boundedValue(job.positionUrl || job.positionURL, 2048)
+    };
+  } catch {
+    return null;
+  }
 }
 
 function jobIdFromPath(pathname: string): string {
@@ -123,45 +173,58 @@ function matchEducation(value: string): string {
 }
 
 function listCards(root: ParentNode): HTMLElement[] {
-  const cards = [...root.querySelectorAll<HTMLElement>(".joblist-box__item")];
+  const cards = [...root.querySelectorAll<HTMLElement>(".job-card")];
   if (cards.length) return cards;
+  const legacyCards = [...root.querySelectorAll<HTMLElement>(".joblist-box__item")];
+  if (legacyCards.length) return legacyCards;
   return [...root.querySelectorAll<HTMLAnchorElement>('a[href*="/jobdetail/"]')]
     .map((anchor) => anchor.closest<HTMLElement>("article,li") || anchor.parentElement)
     .filter((card): card is HTMLElement => Boolean(card));
 }
 
-export function scanZhaopinList(root: ParentNode = document): ListCandidate[] {
+export function scanZhaopinList(
+  root: ParentNode = document,
+  pageJobs: readonly ZhaopinPageJob[] = []
+): ListCandidate[] {
   const seen = new Set<string>();
   const candidates: ListCandidate[] = [];
-  for (const card of listCards(root)) {
+  const pageJobsByIndex = new Map(pageJobs.map((job) => [job.index, job]));
+  for (const [index, card] of listCards(root).entries()) {
+    const pageJob = pageJobsByIndex.get(index) || readPageJobFromCard(card, index);
     const anchor = card.querySelector<HTMLAnchorElement>('a[href*="/jobdetail/"]');
-    if (!anchor) continue;
-    const jobId = zhaopinJobIdFromUrl(anchor.href || anchor.getAttribute("href") || "");
+    const rawUrl = pageJob?.positionUrl || anchor?.href || anchor?.getAttribute("href") || "";
+    const pageJobId = pageJob?.number && /^[A-Za-z0-9_-]{1,128}$/.test(pageJob.number)
+      ? pageJob.number
+      : "";
+    const jobId = pageJobId || zhaopinJobIdFromUrl(rawUrl);
     if (!jobId || seen.has(jobId)) continue;
     let canonicalUrl: string;
     try {
-      canonicalUrl = canonicalZhaopinJobUrl(anchor.href || anchor.getAttribute("href") || "");
+      canonicalUrl = pageJobId && !rawUrl
+        ? "https://www.zhaopin.com/jobdetail/" + pageJobId + ".htm"
+        : canonicalZhaopinJobUrl(rawUrl);
     } catch {
       continue;
     }
     const metadata = metadataText(card);
     const leaves = cardLeafTexts(card);
-    const title = firstText(card, [".jobinfo__name", "[data-job-name]"]) || elementText(anchor.querySelector("h1,h2,h3,strong")) || leaves[0] || "";
-    const company = firstText(card, [".companyinfo__name", "[class*='companyinfo'] [class*='name']"]);
+    const title = pageJob?.name || firstText(card, [".jobinfo__name", "[data-job-name]"]) || elementText(anchor?.querySelector("h1,h2,h3,strong")) || leaves[0] || "";
+    const company = pageJob?.company || firstText(card, [".companyinfo__name", "[class*='companyinfo'] [class*='name']"]);
     const cardText = normalizeText((card.innerText || card.textContent || "")).slice(0, 6000);
     const details = metadata + " " + cardText;
+    const location = pageJob?.location || matchLocation(details);
     seen.add(jobId);
     candidates.push({
       platform: "zhaopin",
       jobId,
-      url: anchor.href || canonicalUrl,
+      url: rawUrl || canonicalUrl,
       canonicalUrl,
       title,
       company,
-      location: matchLocation(details),
-      salary: firstText(card, [".jobinfo__salary"]) || matchSalary(details),
-      experience: matchExperience(details),
-      education: matchEducation(details),
+      location,
+      salary: pageJob?.salary || firstText(card, [".jobinfo__salary"]) || matchSalary(details),
+      experience: pageJob?.experience || matchExperience(details),
+      education: pageJob?.education || matchEducation(details),
       cardText,
       index: candidates.length
     });

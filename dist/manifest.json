@@ -31,6 +31,16 @@
         "https://www.zhaopin.com/*"
       ],
       "js": [
+        "content/zhaopin-main.js"
+      ],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://www.zhaopin.com/*"
+      ],
+      "js": [
         "content/zhaopin.js"
       ],
       "run_at": "document_idle"

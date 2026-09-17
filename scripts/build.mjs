@@ -21,6 +21,7 @@ await build({
     background: resolve("src/background.ts"),
     "content/liepin": resolve("src/content/liepin.ts"),
     "content/zhaopin": resolve("src/content/zhaopin.ts"),
+    "content/zhaopin-main": resolve("src/content/zhaopin-main.ts"),
     options: resolve("src/options.ts"),
     sidepanel: resolve("src/sidepanel.ts")
   },
@@ -39,7 +40,7 @@ await build({
     __JOBFLOW_SUPABASE_PUBLISHABLE_KEY__: JSON.stringify(supabasePublishableKey)
   }
 });
-for (const relativePath of ["background.js", "content/liepin.js", "content/zhaopin.js", "options.js", "sidepanel.js"]) {
+for (const relativePath of ["background.js", "content/liepin.js", "content/zhaopin.js", "content/zhaopin-main.js", "options.js", "sidepanel.js"]) {
   const path = resolve("dist", relativePath);
   const source = await readFile(path, "utf8");
   await writeFile(path, source.replace(/[ \t]+$/gm, ""), "utf8");
@@ -60,6 +61,7 @@ const manifest = {
   background: { service_worker: "background.js" },
   content_scripts: [
     { matches: ["https://*.liepin.com/*"], js: ["content/liepin.js"], run_at: "document_idle" },
+    { matches: ["https://www.zhaopin.com/*"], js: ["content/zhaopin-main.js"], run_at: "document_idle", world: "MAIN" },
     { matches: ["https://www.zhaopin.com/*"], js: ["content/zhaopin.js"], run_at: "document_idle" }
   ],
   side_panel: { default_path: "sidepanel.html" },

@@ -6,7 +6,8 @@ import {
   isZhaopinListPage,
   zhaopinBlockedPageReason,
   zhaopinJobIdFromUrl,
-  scanZhaopinList
+  scanZhaopinList,
+  type ZhaopinPageJob
 } from "../platforms/zhaopin";
 import { type DetailFailureCode } from "../domain/messages";
 
@@ -25,6 +26,7 @@ const DETAIL_PAGE_LOAD_TIMEOUT_MS = 10_000;
 const STABLE_FRAME_FALLBACK_MS = 100;
 const DETAIL_LEASE_HANDSHAKE_ATTEMPTS = 20;
 const DETAIL_LEASE_HANDSHAKE_INTERVAL_MS = 250;
+const ZHAOPIN_BRIDGE_CHANNEL = "__JOBFLOW_ZHAOPIN_BRIDGE__";
 
 function errorMessage(error: unknown, fallback: string): string {
   return (error instanceof Error && error.message ? error.message : fallback).slice(0, 300);
@@ -88,6 +90,63 @@ function mountLauncher(): void {
   document.documentElement.append(host);
 }
 
+function parseBridgeJobs(value: unknown): ZhaopinPageJob[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): ZhaopinPageJob[] => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as Record<string, unknown>;
+    if (!Number.isInteger(record.index) || (record.index as number) < 0) return [];
+    const text = (field: string, maxLength: number): string => {
+      const raw = record[field];
+      return typeof raw === "string" || typeof raw === "number"
+        ? String(raw).replace(/\s+/g, " ").trim().slice(0, maxLength)
+        : "";
+    };
+    const number = text("number", 128);
+    if (!number) return [];
+    return [{
+      index: record.index as number,
+      number,
+      name: text("name", 300),
+      salary: text("salary", 100),
+      education: text("education", 100),
+      experience: text("experience", 100),
+      company: text("company", 300),
+      location: text("location", 200),
+      positionUrl: text("positionUrl", 2048)
+    }];
+  });
+}
+
+async function requestBridgeJobs(): Promise<ZhaopinPageJob[]> {
+  const requestId = crypto.randomUUID();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (jobs: ZhaopinPageJob[]): void => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("message", onMessage);
+      window.clearTimeout(timer);
+      resolve(jobs);
+    };
+    const onMessage = (event: MessageEvent): void => {
+      if (event.source !== window) return;
+      const data = event.data as { channel?: unknown; type?: unknown; requestId?: unknown; jobs?: unknown } | null;
+      if (data?.channel !== ZHAOPIN_BRIDGE_CHANNEL
+        || data.type !== "scan-response"
+        || data.requestId !== requestId) return;
+      finish(parseBridgeJobs(data.jobs));
+    };
+    const timer = window.setTimeout(() => finish([]), 800);
+    window.addEventListener("message", onMessage);
+    window.postMessage({
+      channel: ZHAOPIN_BRIDGE_CHANNEL,
+      type: "scan-request",
+      requestId
+    }, "*");
+  });
+}
+
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
   if (!message || typeof message !== "object") return false;
   if ((message as { type?: unknown }).type !== "CONTENT_SCAN") return false;
@@ -95,8 +154,10 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     sendResponse({ sourceUrl: location.href, candidates: [] });
     return false;
   }
-  sendResponse({ sourceUrl: location.href, candidates: scanZhaopinList() });
-  return false;
+  void requestBridgeJobs().then((pageJobs) => {
+    sendResponse({ sourceUrl: location.href, candidates: scanZhaopinList(document, pageJobs) });
+  });
+  return true;
 });
 
 function leaseFromLocation(): string | null {

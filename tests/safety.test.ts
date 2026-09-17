@@ -17,7 +17,7 @@ describe("MV3 safety gate", () => {
       "sidepanel.html",
       "sidepanel.js"
     ]));
-    expect(contentFiles).toEqual(expect.arrayContaining(["liepin.js", "zhaopin.js"]));
+    expect(contentFiles).toEqual(expect.arrayContaining(["liepin.js", "zhaopin.js", "zhaopin-main.js"]));
     const manifest = JSON.parse(await readDist("manifest.json"));
     expect(manifest.manifest_version).toBe(3);
     expect(manifest.permissions).toEqual(["storage", "tabs", "alarms", "sidePanel"]);
@@ -39,6 +39,7 @@ describe("MV3 safety gate", () => {
   it("contains no private Liepin API, scrolling, form, or cookie implementation", async () => {
     const content = await readDist("content/liepin.js");
     const zhaopinContent = await readDist("content/zhaopin.js");
+    const zhaopinMainContent = await readDist("content/zhaopin-main.js");
     const background = await readDist("background.js");
     const adapter = await readSource("src/platforms/liepin.ts");
     const backgroundSource = await readSource("src/background.ts");
@@ -54,6 +55,7 @@ describe("MV3 safety gate", () => {
     ]) {
       expect(content).not.toContain(forbidden);
       expect(zhaopinContent).not.toContain(forbidden);
+      expect(zhaopinMainContent).not.toContain(forbidden);
     }
     expect(adapter).toContain("executeLiepinReviewedSend");
     expect(adapter).toContain('data-selector="chat-chat"');
@@ -73,6 +75,8 @@ describe("MV3 safety gate", () => {
     expect(zhaopinContent).not.toContain("chrome.storage");
     expect(zhaopinContent).not.toContain("CONTENT_REVIEWED_SEND_EXECUTE");
     expect(zhaopinContent).not.toContain("CONTENT_REVIEWED_SEND_PREFLIGHT");
+    expect(zhaopinMainContent).not.toContain("chrome.runtime");
+    expect(zhaopinMainContent).not.toContain("chrome.storage");
     expect(background).toContain("TRUSTED_CONTEXTS");
     expect(background).not.toContain("liveUnlocked");
     expect(backgroundSource).toContain("isTrustedOptionsSender");
