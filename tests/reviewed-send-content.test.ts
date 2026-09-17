@@ -69,3 +69,28 @@ it("rejects execute commands that were not unlocked by the same successful prefl
     .toMatchObject({ ok: false, reason: expect.stringContaining("检查") });
   expect(actionClicks).toBe(0);
 });
+
+it("waits for a delayed Liepin action before completing content preflight", async () => {
+  await loadContent();
+  document.querySelector(".btn-main")?.remove();
+  setTimeout(() => {
+    const action = document.createElement("button");
+    action.className = "btn-main";
+    action.dataset.selector = "chat-chat";
+    action.dataset.jobid = "1980000301";
+    action.textContent = "聊一聊";
+    document.body.append(action);
+  }, 100);
+
+  const result = await dispatch({
+    type: "CONTENT_REVIEWED_SEND_PREFLIGHT",
+    leaseId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    platformJobId: "1980000301"
+  });
+
+  expect(result).toMatchObject({
+    ok: true,
+    platformJobId: "1980000301",
+    actionTier: "primary"
+  });
+});

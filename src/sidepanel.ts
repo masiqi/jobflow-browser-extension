@@ -76,6 +76,7 @@ if (!appElement) throw new Error("侧边栏根节点不存在");
 const app: HTMLDivElement = appElement;
 let scanBusy = false;
 let startBusy = false;
+let refreshBusy = false;
 let scanFeedback: ScanFeedback = { kind: "idle", message: "" };
 let selectedJobIds: Set<string> | null = null;
 let selectedSourceUrl = "";
@@ -140,6 +141,9 @@ function resetSelectedJobs(preview: ScanPreview): void {
 
 function previewMarkup(preview: ScanPreview | null, selectedJobs: Set<string>): string {
   if (!preview) return '<p class="empty">扫描当前猎聘结果页后，可选择新职位生成草稿。</p>';
+  const processableJobIds = new Set(preview.processableJobIds);
+  const selectedProcessableCount = [...processableJobIds].filter((jobId) => selectedJobs.has(jobId)).length;
+  const allProcessableSelected = processableJobIds.size > 0 && selectedProcessableCount === processableJobIds.size;
   return [
     '<div class="metrics">',
     '<div><strong>' + preview.observedCount + '</strong><span>已发现</span></div>',
@@ -148,11 +152,13 @@ function previewMarkup(preview: ScanPreview | null, selectedJobs: Set<string>): 
     '<div><strong>' + preview.draftedCount + '</strong><span>已有草稿</span></div>',
     '</div>',
     preview.candidates.length
-      ? '<div class="candidate-list">'
+      ? '<div class="candidate-toolbar"><label class="select-all"><input id="selectAll" type="checkbox" aria-label="全选可处理职位" '
+        + (allProcessableSelected ? "checked" : "") + (processableJobIds.size ? "" : " disabled")
+        + '><span>全选可处理职位</span></label><small>可处理 ' + String(processableJobIds.size) + ' 个</small></div><div class="candidate-list">'
       : '<p class="scan-empty">当前页面未识别到职位，页面仍在加载时可稍后重试。</p>',
     preview.candidates.map((candidate) => {
       const selected = selectedJobs.has(candidate.jobId);
-      const processable = preview.processableJobIds.includes(candidate.jobId);
+      const processable = processableJobIds.has(candidate.jobId);
       return '<label class="candidate ' + (processable ? "" : "disabled") + '"><input type="checkbox" data-job-id="' + escapeHtml(candidate.jobId)
         + '" ' + (selected ? "checked" : "") + " " + (processable ? "" : "disabled") + '><span><b>' + escapeHtml(candidate.title)
         + '</b><small>' + escapeHtml(candidate.company) + " · " + escapeHtml(candidate.salary)
@@ -242,20 +248,23 @@ function recordsMarkup(records: OpportunityRecord[], deliveries: DeliveryRecord[
   }).join("") || '<p class="empty">暂无职位记录。</p>';
 }
 
-async function render(): Promise<void> {
+async function render(stateOverride?: AppState): Promise<void> {
   let state: AppState;
-  try {
-    state = await sendCommand<AppState>({ type: "GET_APP_STATE" });
-  } catch (error) {
-    app.innerHTML = '<div class="error">' + escapeHtml(error instanceof Error ? error.message : error) + "</div>";
-    return;
+  if (stateOverride) {
+    state = stateOverride;
+  } else {
+    try {
+      state = await sendCommand<AppState>({ type: "GET_APP_STATE" });
+    } catch (error) {
+      app.innerHTML = '<div class="error">' + escapeHtml(error instanceof Error ? error.message : error) + "</div>";
+      return;
+    }
   }
   const run = state.run;
   const selectedJobs = selectedJobsForState(state.scanPreview, run);
-  const selectedCount = selectedJobs.size;
+  const selectedCount = selectedProcessableCount(state.scanPreview, selectedJobs);
   const batchActive = run?.status === "running" || run?.status === "paused" || run?.status === "queued";
-  const selectionWithinLimit = selectedCount > 0
-    && selectedCount <= state.settings.maxJobsPerBatch
+  const selectionReady = selectedCount > 0
     && !batchActive
     && !startBusy;
   const policy = POLICY_LABELS[state.settings.executionPolicy];
@@ -279,12 +288,9 @@ async function render(): Promise<void> {
     '<div id="scanStatus" class="scan-status ' + escapeHtml(scanFeedback.kind)
       + '" role="status" aria-live="polite">' + escapeHtml(scanFeedback.message) + "</div>",
     previewMarkup(state.scanPreview, selectedJobs),
-    '<div class="batch-row"><label>本批上限<input id="batchLimit" type="number" min="1" max="20" value="',
-    String(state.settings.maxJobsPerBatch),
-    '"></label><div class="batch-start"><small id="selectionSummary">已选 ', String(selectedCount), " / 上限 ",
-    String(state.settings.maxJobsPerBatch), '</small><button id="start" class="primary '
+    '<div class="batch-row"><div class="batch-start"><small id="selectionSummary">已选 ', String(selectedCount), '</small><button id="start" class="primary '
     + (state.settings.executionPolicy === "automatic_send" ? "automatic-action" : "") + '" type="button"',
-    selectionWithinLimit ? "" : " disabled",
+    selectionReady ? "" : " disabled",
     ' aria-busy="' + String(startBusy) + '">',
     escapeHtml(startBusy ? "正在启动" : startLabel), "</button></div></div></section>",
     '<section><div class="section-title"><h2>批次</h2><div id="run-actions"></div></div>',
@@ -300,7 +306,10 @@ async function render(): Promise<void> {
   headerActions?.append(iconButton("settings", "打开管理台", Settings));
   const scanActions = document.querySelector("#scan-actions");
   scanActions?.append(scanButton(state.auth.status !== "signed_in"));
-  scanActions?.append(iconButton("refresh", "刷新状态", RefreshCw));
+  const refresh = iconButton("refresh", refreshBusy ? "正在刷新状态" : "刷新状态", RefreshCw, refreshBusy || scanBusy);
+  refresh.setAttribute("aria-busy", String(refreshBusy));
+  refresh.dataset.busy = String(refreshBusy);
+  scanActions?.append(refresh);
   const runActions = document.querySelector("#run-actions");
   runActions?.append(iconButton("pause", "暂停批次", CirclePause, run?.status !== "running"));
   runActions?.append(iconButton("resume", "继续批次", CirclePlay, run?.status !== "paused"));
@@ -308,7 +317,7 @@ async function render(): Promise<void> {
 
   document.querySelector("#settings")?.addEventListener("click", () => chrome.runtime.openOptionsPage());
   document.querySelector("#viewAll")?.addEventListener("click", () => chrome.runtime.openOptionsPage());
-  document.querySelector("#refresh")?.addEventListener("click", () => void render());
+  document.querySelector("#refresh")?.addEventListener("click", () => void refreshState());
   document.querySelector("#scan")?.addEventListener("click", () => void scanCurrentPage());
   document.querySelector("#pause")?.addEventListener("click", () => void perform({ type: "PAUSE_BATCH" }));
   document.querySelector("#resume")?.addEventListener("click", () => void perform({ type: "RESUME_BATCH" }));
@@ -319,16 +328,13 @@ async function render(): Promise<void> {
       if (!jobId || !selectedJobIds) return;
       if (input.checked) selectedJobIds.add(jobId);
       else selectedJobIds.delete(jobId);
-      updateSelectionControls(state.settings.maxJobsPerBatch, batchActive);
+      updateSelectionControls(state.scanPreview, batchActive);
     });
   });
-  document.querySelector("#batchLimit")?.addEventListener("change", async (event) => {
+  document.querySelector("#selectAll")?.addEventListener("change", (event) => {
     const input = event.currentTarget as HTMLInputElement;
-    const value = Math.max(1, Math.min(20, Number(input.value) || 10));
-    await perform({
-      type: "UPDATE_SETTINGS",
-      settings: { ...state.settings, maxJobsPerBatch: value }
-    });
+    toggleAllProcessableJobs(state.scanPreview, input.checked);
+    updateSelectionControls(state.scanPreview, batchActive);
   });
   document.querySelector("#start")?.addEventListener("click", () => {
     const candidateIds = state.scanPreview?.candidates.map((candidate) => candidate.jobId) ?? [];
@@ -337,17 +343,52 @@ async function render(): Promise<void> {
       type: "START_BATCH",
       selectedJobIds: selected,
       expectedExecutionPolicy: state.settings.executionPolicy
-    });
+    }, state.scanPreview, batchActive);
   });
+  syncSelectAllControl(state.scanPreview, selectedJobs);
   configureWaitCountdownTimer();
 }
 
-function updateSelectionControls(limit: number, batchActive: boolean): void {
-  const count = selectedJobIds?.size ?? 0;
+function selectedProcessableCount(preview: ScanPreview | null, selectedJobs: Set<string>): number {
+  if (!preview) return 0;
+  const processableJobIds = new Set(preview.processableJobIds);
+  return [...selectedJobs].filter((jobId) => processableJobIds.has(jobId)).length;
+}
+
+function toggleAllProcessableJobs(preview: ScanPreview | null, checked: boolean): void {
+  if (!preview || !selectedJobIds) return;
+  for (const jobId of preview.processableJobIds) {
+    if (checked) selectedJobIds.add(jobId);
+    else selectedJobIds.delete(jobId);
+  }
+}
+
+function syncSelectAllControl(preview: ScanPreview | null, selectedJobs: Set<string>): void {
+  const control = document.querySelector<HTMLInputElement>("#selectAll");
+  if (!control || !preview) return;
+  const processableJobIds = new Set(preview.processableJobIds);
+  const selectedProcessableCount = [...processableJobIds].filter((jobId) => selectedJobs.has(jobId)).length;
+  control.checked = processableJobIds.size > 0 && selectedProcessableCount === processableJobIds.size;
+  control.indeterminate = selectedProcessableCount > 0 && selectedProcessableCount < processableJobIds.size;
+  control.disabled = processableJobIds.size === 0;
+}
+
+function syncCandidateControls(selectedJobs: Set<string>): void {
+  document.querySelectorAll<HTMLInputElement>("[data-job-id]").forEach((input) => {
+    const jobId = input.dataset.jobId;
+    if (jobId) input.checked = selectedJobs.has(jobId);
+  });
+}
+
+function updateSelectionControls(preview: ScanPreview | null, batchActive: boolean): void {
+  const count = selectedProcessableCount(preview, selectedJobIds ?? new Set());
   const summary = document.querySelector<HTMLElement>("#selectionSummary");
   const start = document.querySelector<HTMLButtonElement>("#start");
-  if (summary) summary.textContent = "已选 " + count + " / 上限 " + limit;
-  if (start) start.disabled = startBusy || batchActive || count === 0 || count > limit;
+  if (summary) summary.textContent = "已选 " + count;
+  if (start) start.disabled = startBusy || batchActive || count === 0;
+  const selectedJobs = selectedJobIds ?? new Set();
+  syncCandidateControls(selectedJobs);
+  syncSelectAllControl(preview, selectedJobs);
 }
 
 function updateStartBusy(busy: boolean): void {
@@ -374,6 +415,38 @@ function updateScanFeedback(feedback: ScanFeedback, busy: boolean): void {
     button.dataset.busy = String(busy);
     const label = button.querySelector("span");
     if (label) label.textContent = busy ? "正在扫描" : "扫描当前页";
+  }
+  updateRefreshControl();
+}
+
+function updateRefreshControl(): void {
+  const button = document.querySelector<HTMLButtonElement>("#refresh");
+  if (!button) return;
+  const label = refreshBusy ? "正在刷新状态" : "刷新状态";
+  button.disabled = refreshBusy || scanBusy;
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.setAttribute("aria-busy", String(refreshBusy));
+  button.dataset.busy = String(refreshBusy);
+}
+
+async function refreshState(): Promise<void> {
+  if (refreshBusy || scanBusy) return;
+  refreshBusy = true;
+  updateRefreshControl();
+  updateScanFeedback({ kind: "progress", message: "正在刷新状态" }, false);
+  try {
+    const state = await sendCommand<AppState>({ type: "GET_APP_STATE" });
+    refreshBusy = false;
+    scanFeedback = { kind: "success", message: "状态已刷新" };
+    await render(state);
+  } catch (error) {
+    refreshBusy = false;
+    updateRefreshControl();
+    updateScanFeedback({
+      kind: "error",
+      message: error instanceof Error ? error.message : String(error)
+    }, false);
   }
 }
 
@@ -408,7 +481,11 @@ async function perform(request: Parameters<typeof sendCommand>[0]): Promise<void
   }
 }
 
-async function startBatchFromPanel(request: Parameters<typeof sendCommand>[0]): Promise<void> {
+async function startBatchFromPanel(
+  request: Parameters<typeof sendCommand>[0],
+  preview: ScanPreview | null,
+  batchActive: boolean
+): Promise<void> {
   if (startBusy) return;
   const toast = document.querySelector<HTMLElement>("#toast");
   updateStartBusy(true);
@@ -419,10 +496,7 @@ async function startBatchFromPanel(request: Parameters<typeof sendCommand>[0]): 
   } catch (error) {
     startBusy = false;
     updateStartBusy(false);
-    updateSelectionControls(
-      Number(document.querySelector<HTMLInputElement>("#batchLimit")?.value || 10),
-      false
-    );
+    updateSelectionControls(preview, batchActive);
     if (toast) toast.textContent = error instanceof Error ? error.message : String(error);
   }
 }

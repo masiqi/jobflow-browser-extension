@@ -68,8 +68,8 @@ export const scanPreviewSchema = z.object({
   duplicateCount: z.number().int().nonnegative(),
   excludedCount: z.number().int().nonnegative(),
   draftedCount: z.number().int().nonnegative(),
-  processableJobIds: z.array(z.string()),
-  selectedJobIds: z.array(z.string()).max(20)
+  processableJobIds: z.array(z.string()).max(500),
+  selectedJobIds: z.array(z.string()).max(500)
 }).strict();
 
 const batchItemSchema = z.object({
@@ -106,7 +106,7 @@ export const batchRunSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   currentIndex: z.number().int().nonnegative(),
-  items: z.array(batchItemSchema).max(20),
+  items: z.array(batchItemSchema).max(500),
   draftCount: z.number().int().nonnegative(),
   excludedCount: z.number().int().nonnegative(),
   reviewCount: z.number().int().nonnegative(),
@@ -147,7 +147,7 @@ export const extensionSettingsSchema = z.object({
   rules: ruleSettingsSchema,
   model: modelSettingsSchema,
   executionPolicy: executionPolicySchema,
-  maxJobsPerBatch: z.number().int().min(1).max(20),
+  maxJobsPerBatch: z.number().int().min(1).max(500),
   dailySendLimit: z.number().int().min(1).max(500),
   automaticSendDelayMinSeconds: z.number().int().min(5).max(600),
   automaticSendDelayMaxSeconds: z.number().int().min(5).max(600),
@@ -228,7 +228,7 @@ export const runtimeRequestSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("SCAN_CURRENT_TAB") }).strict(),
   z.object({
     type: z.literal("START_BATCH"),
-    selectedJobIds: z.array(z.string().min(1).max(128)).min(1).max(20),
+    selectedJobIds: z.array(z.string().min(1).max(128)).min(1).max(500),
     expectedExecutionPolicy: executionPolicySchema
   }).strict(),
   z.object({ type: z.literal("PAUSE_BATCH") }).strict(),

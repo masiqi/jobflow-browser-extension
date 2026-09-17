@@ -103,6 +103,7 @@ export interface ExtensionSettings {
   rules: JdRuleSettings;
   model: ModelRouteSettings;
   executionPolicy: ExecutionPolicy;
+  /** Legacy setting retained for storage compatibility; the queue is capped by the 500-item scan snapshot. */
   maxJobsPerBatch: number;
   dailySendLimit: number;
   automaticSendDelayMinSeconds: number;

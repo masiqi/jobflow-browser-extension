@@ -148,6 +148,14 @@ leased detail tab
 -> validated and persisted greeting draft
 ```
 
+The content lifecycle is deliberately browser-native: after the extension-owned
+document reaches `document_idle`, it waits for the normal `load` event when
+needed (bounded at 10 seconds), settles two render turns with a timer fallback
+for background-tab rAF suspension, and then runs the existing bounded DOM
+extraction loop. Read-only send preflight uses the same lifecycle wait and polls
+for a missing job-bound action for at most 10 seconds. These waits do not
+intercept resources, manufacture `isTrusted`, or operate a risk challenge.
+
 Only an exact `proceed` plus a valid persisted greeting can enter `delivery_ready`. Automatic delivery reloads the owner-scoped opportunity and current draft after the model gateway returns, chooses the newest revision whose text equals `currentText`, recomputes SHA-256, and stores only revision/hash identifiers in the batch.
 
 Existing `draft_ready` records are not processable automatic inputs. User overrides append `user_override`, preserve the original exclusion, generate a draft, and remain in the two-stage reviewed-send flow.
@@ -283,12 +291,12 @@ Unknown failures at or after the write-start marker are always post-write ambigu
 - Segmented execution-policy control with `仅生成`, `逐条确认`, and `自动投递`.
 - `automatic_send` uses explicit real-write wording and is opt-in.
 - `draft_only` removes reviewed-send controls; `reviewed_send` and `automatic_send` keep manual controls for existing and overridden drafts.
-- Reviewed PREPARE opens an absent exact job tab in the background, retries content readiness, and reloads an exact stale existing tab once without entering the platform write boundary.
+- Reviewed PREPARE opens an absent exact job tab in the background, waits/retries content readiness for at most 30 seconds (the content page-load and missing-action waits are each bounded at 10 seconds), and reloads an exact stale existing tab once without entering the platform write boundary.
 - Every asynchronous command button changes label/disabled/`aria-busy` state synchronously; user-requested generation is also single-flight per opportunity in background state.
 
 ### Side panel
 
-- Continue showing observed, processable, duplicate, drafted, selected, and upper-limit counts plus the selectable list.
+- Continue showing observed, processable, duplicate, drafted, and selected counts plus the selectable list. Offer a master checkbox for processable jobs; the scan snapshot remains capped at 500 candidates, but there is no separate per-batch selection limit.
 - Show the policy snapshot for the next run.
 - In automatic mode, render one primary real-write action containing the selected count.
 - Settings expose minimum and maximum delay inputs beside the automatic policy; the side panel shows the currently configured range and a live countdown only when waiting.

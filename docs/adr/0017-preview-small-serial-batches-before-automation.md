@@ -30,6 +30,13 @@ Drafting and dry-run activity do not consume this limit. Immediately before the 
 
 Automatic mode adds a current-device account/platform write interval. After any JobFlow Liepin write-start marker, including reviewed-send, the extension stores the next automatic-write timestamp. The interval defaults to a uniformly sampled integer from 10 to 20 seconds and is configurable from 5 to 600 seconds. It applies only to platform writes, not scanning, JD reading, model work, exclusions, or reviews.
 
+## Amendment: remove the per-batch selection limit
+
+- Date: 2026-09-17
+- Status: Accepted
+
+The side panel no longer exposes or enforces a separate “batch limit”. The user may select every processable job in the current scan snapshot, and the batch command submits exactly those selected platform job IDs. The snapshot and runtime payload remain capped at 500 candidates to protect storage and message sizes. Daily delivery quota, navigation pacing, and automatic write intervals remain independent safeguards.
+
 ## Amendment: click-assumed completion for automatic debugging
 
 - Date: 2026-09-17
@@ -67,3 +74,16 @@ An automatic resume that already carries a same-batch draft revision and SHA-256
 Real-browser acceptance showed that write-only throttling still allowed several extension-owned detail navigations in a short burst, including a very short-lived terminal page, followed by a Liepin SMS risk challenge. The extension now keeps a separate owner/device Liepin navigation throttle: 15-30 seconds between navigation starts, persisted across batches and Reload, with model time counting toward the gap. A normal detail tab exists for at least 8 seconds before JobFlow closes it.
 
 This pacing reduces JobFlow's own burstiness but is not represented as anti-detection or a guarantee against risk controls. The extension does not spoof identity or behavior and does not bypass challenges. A validated Liepin intercept/SMS redirect pauses before write, remains open and active for the user, and requires explicit resume after the user resolves it.
+
+## Amendment: normal page lifecycle and native control semantics
+
+- Date: 2026-09-17
+- Status: Accepted
+
+Detail content waits for the browser `load` lifecycle (bounded at 10 seconds),
+then settles two render turns with a timer fallback for background-tab rendering
+throttling before extracting the detail DOM. Read-only send preflight waits for
+delayed job-bound controls for a bounded interval. The adapter focuses visible
+controls and calls their native `click()` method, but scripted events remain
+untrusted. These changes improve page compatibility only; they are not a
+fingerprint, mouse-trajectory, CAPTCHA, or risk-control bypass.

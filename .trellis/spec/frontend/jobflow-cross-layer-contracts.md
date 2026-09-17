@@ -142,7 +142,7 @@ Runtime requests:
 - Reject unknown fields with strict Zod objects.
 - Live behavior exists only in strict reviewed-send prepare/confirm commands or in a side-panel `automatic_send` batch whose selected IDs and execution policy were explicitly authorized at start. Page-load, scan, settings save, startup, scroll, pagination, upload, and free-form platform commands cannot write to Liepin.
 - Content scan returns sourceUrl plus at most 500 decoded list candidates.
-- A batch accepts 1 through 20 selected platform job IDs. Batch start is accepted only from the exact extension side panel URL, must include the expected execution policy, must match trusted settings, and must fail if another queued/running/paused run already exists.
+- A batch accepts 1 through 500 selected platform job IDs from the current scan snapshot. There is no separate per-batch selection limit below that structural cap. Batch start is accepted only from the exact extension side panel URL, must include the expected execution policy, must match trusted settings, and must fail if another queued/running/paused run already exists.
 - Stored-detail retry accepts only an opportunity UUID. JD text, profile data, model credentials, and status cannot be supplied by the page command.
 - Detail-page lease handshake accepts only a platform job ID from a trusted Liepin content sender. It returns the current extension-owned item lease only when sender tab ID, sender URL, current batch item, current job ID, item status, and run status match. It returns no lease for user-opened details, options/sidepanel callers, wrong tabs/jobs, historical items, completed/cancelled runs, or non-Liepin origins.
 - Reviewed-send initiation is accepted only from the exact extension options page and carries opportunity/revision/hash identity, never caller-supplied message or JD content.
@@ -193,7 +193,7 @@ Long-running UI commands:
 - Success names the completed domain result and next state. Failure remains visible, restores controls, and permits retry.
 - A transient toast may supplement inline status but must not be the only feedback for a long-running operation.
 - User-edited transient selections remain the UI source of truth across state notifications and re-renders; do not restore persisted scan-time defaults over them.
-- Show the actual selected count separately from the configured upper limit, and submit exactly the selected IDs.
+- Show the actual selected count without a separate configurable batch limit, and submit exactly the selected IDs.
 - Failed batch items and opportunity summaries expose their redacted local `error` / `latestReason` in the side panel.
 - Running batches show the current item's domain stage; a completed-item fraction such as `0/1` is not sufficient feedback by itself.
 - Automatic wait countdown rendering is client-side display only. Re-rendering the side panel or updating the countdown must not redraw intervals, consume quota, run preflight, or trigger content execution.
@@ -221,6 +221,8 @@ Liepin detail capture:
 - A Liepin risk redirect may replace the detail pathname with a `safe.liepin.com` intercept or SMS-verification route. Content recovers only an HTTPS Liepin `/job|a/<id>.shtml` identity from the redirect's `backurl`; background returns a lease only when extension ID, sender tab, current item, job ID, and run state all match.
 - The platform-owned title `安全中心-风险提示` and known `safe.liepin.com` intercept/verification routes are `risk_control` even when the body has not rendered. They report immediately instead of falling through to the detail watchdog.
 - Login and risk blockers pause before write, clear the detail alarm, detach the tab from automatic ownership, activate it, and leave it open for the user. JobFlow never fills, submits, or bypasses the verification flow; resume remains an explicit user command.
+- A leased detail content script waits for the browser `load` event when `document.readyState` is not `complete`, bounded at 10 seconds, then waits for two render turns. The render-turn wait has a 100 ms timer fallback because background tabs may suspend `requestAnimationFrame`; a load timeout is logged with only lifecycle metadata and the bounded DOM extraction loop continues.
+- Content-side send preflight is asynchronous and waits for page readiness plus up to 10 seconds for a job-bound action that is still missing. It returns an explicit blocker after the bound rather than declaring a loaded page ready or entering the write boundary.
 - Normal terminal detail handling waits until the extension-owned tab has existed for at least 8 seconds before closing it. Longer model/filter processing naturally satisfies this dwell; risk/login handoff is not closed by this mechanism.
 - Chrome Reload invalidates already-injected content-script contexts while their pending promises and page event listeners may still resume. Every outbound content-to-background message must use one runtime wrapper that checks for a live `chrome.runtime.sendMessage` immediately before the call and catches invalidation during the call.
 - A missing runtime or `Extension context invalidated` rejection stops the stale content operation without retry, user-facing failure, or unhandled promise rejection. Other transport errors remain bounded and visible, and an acknowledged `{ ok: false }` remains a protocol failure rather than being misclassified as context invalidation.
@@ -257,13 +259,14 @@ Stored-detail retry:
 Reviewed send:
 
 - PREPARE is read-only with respect to Liepin and quota. It validates owner, `draft_ready`, current revision/hash, exact job tab, login/risk state, and one selected action tier.
-- PREPARE reuses an exact open Liepin job tab or opens the authoritative canonical URL in a background tab, then retries only content readiness for at most 15 seconds. If an exact existing tab has a stale post-Reload content context, it reloads that tab once. These navigation operations do not click Liepin, reserve quota, or authorize CONFIRM.
+- PREPARE reuses an exact open Liepin job tab or opens the authoritative canonical URL in a background tab, then waits/retries only content readiness for at most 30 seconds. The content-side lifecycle/preflight bounds are 10 seconds each; the larger transport bound prevents the background from abandoning a legitimate asynchronous response. If an exact existing tab has a stale post-Reload content context, it reloads that tab once. These navigation operations do not click Liepin, reserve quota, or authorize CONFIRM.
 - Liepin `/job/` pages may expose a ten-digit URL ID while job-bound action elements expose the verified eight-digit suffix. Action and application-evidence matching accepts exact equality or an eight-digit suffix of a nine-or-more-digit platform ID; shorter, nonnumeric, and unrelated recommendation IDs never match.
 - If a prior detail refresh regressed a prepared opportunity to `extracting`, `prepare_reviewed_delivery` may repair it only when an existing owner-scoped delivery record already carries the exact requested revision and SHA-256 and the current draft/revision/hash all still match. An arbitrary old draft cannot activate this recovery.
 - CONFIRM reruns preflight, atomically reserves the Asia/Shanghai daily unit, records the write boundary and both needed component attempts, then sends one leased content command.
 - Reservations distinguish unused from write-started. Only unused reservations may be released; retries for one opportunity reuse its reservation.
 - The configurable Liepin daily limit defaults to 150 and accepts 1 through 500.
 - DOM interaction is restricted to the job-bound Liepin adapter. It prefers the primary `chat-chat` action, reuses an already-open chat surface, and never searches the whole page for an arbitrary composer/send pair.
+- A job-bound adapter control receives focus with `{ preventScroll: true }` before the adapter invokes its native `HTMLElement.click()` behavior. Text controls receive focus before their value setter and `input`/`change` events. This models normal control semantics for page compatibility but cannot make a scripted event `isTrusted` or bypass platform risk controls.
 - After `chat-chat`, prefer the unique current Liepin IM surface `.im-ui-chat-input` with exactly one visible `textarea.im-ui-textarea` and one visible `.im-ui-basic-send-btn`; only fall back to the existing unique chat-local structural pairing. A known-class match may accept a non-`button` send element, but may not escape its chat root.
 - Chat-surface discovery waits up to 15 seconds because Liepin loads its federated IM bundle asynchronously. Tests use a virtual clock; production code must not reduce this to the earlier 4-second assumption without live timing evidence.
 - Chat controls may be mounted in the top document, an open ShadowRoot, or an accessible same-origin iframe. Search those composed-tree roots with a visited-scope set; skip cross-origin frames rather than broadening permissions or attempting to read them.
@@ -335,6 +338,9 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 | Adapter detail has a schema-invalid field | Reject immediately and report `DETAIL_FAILED` with the boundary error |
 | Platform stop banner says the job is unavailable | Report `job_unavailable`, persist the exact bounded reason, mark failed, and continue without model/quota/write |
 | Detail has an unknown DOM timeout, login, or risk control | Pause an automatic batch on the current item without entering the write boundary |
+| Detail document is still `loading` or `interactive` | Wait for `load` for at most 10 seconds, then wait for two bounded render turns before the DOM extraction loop |
+| Background tab suspends `requestAnimationFrame` during stabilization | Use the 100 ms timer fallback and continue without an unbounded wait |
+| Content preflight sees a missing job-bound action after page readiness | Poll for at most 10 seconds, then return `missing_action`; do not click or reserve quota while waiting |
 | Valid matching detail is accepted | Persist owner-scoped JD/recruiter/hash before profile, rule, or model work |
 | Repeated detail request ID | Update the projection idempotently and keep one `details_captured` event |
 | `c.liepin.com/` candidate homepage | Accept as a current-DOM list route |
@@ -386,6 +392,8 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 - Good: a one-item user selection remains one checked item after batch status notifications, regardless of the scan's original default selection.
 - Good: detail extraction clears its alarm, then a slow model request is governed only by the provider timeout.
 - Good: Liepin removes the URL fragment before content startup; the exact extension-owned tab and job retrieve the current lease through the bounded handshake, then submit one `DETAIL_READY`.
+- Good: a detail page reaches `interactive`, emits `load`, settles two render turns, and only then reports its validated `DetailJob`; a delayed job-bound action is similarly accepted by asynchronous preflight within its bound.
+- Good: the adapter focuses the visible job-bound action/composer and invokes the element's native `click()` method; scripted events remain untrusted and any risk challenge remains a user handoff.
 - Bad: assume a third-party SPA preserves URL fragments, or return a batch lease merely because any Liepin detail page asks for one.
 - Good: runtime-valid detail is persisted before evaluation; a later provider failure leaves the JD visible in the record center.
 - Bad: accept a profile object from the extension as approved truth.
@@ -417,6 +425,8 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 - Bad: leave a button visually unchanged while awaiting a model request and rely on a completion toast as the only feedback.
 - Bad: accept every path on `c.liepin.com` merely because the host is trusted.
 - Bad: keep a detail-readiness alarm active while suitability or greeting models are running.
+- Bad: treat `document_idle` as proof that every page resource and async control has rendered, wait on an unbounded `requestAnimationFrame`, or use a missing-action preflight result as permission to write.
+- Bad: dispatch a lone synthetic `MouseEvent("click")` and claim it is a human click, spoof `isTrusted`, alter browser fingerprints, or automate a CAPTCHA/risk challenge.
 - Bad: assert a few extracted fields in a fixture without parsing the full adapter output through `detailJobSchema`.
 - Bad: ignore an `{ ok: false }` response to `DETAIL_READY` and let the lease expire as a generic timeout.
 - Bad: log provider `message.content`, arbitrary unknown output keys, Zod input values, or complete issue messages.
@@ -440,6 +450,7 @@ For every contract change, update the nearest focused test and rerun the full ga
 - tests/contracts.test.ts: detail-readiness alarm clearing precedes deterministic and model processing.
 - tests/liepin-content.test.ts: rejected `DETAIL_READY` acknowledgements become explicit detail failures.
 - tests/liepin-content.test.ts: a valid no-hash detail retrieves its lease by bounded handshake, retries a startup race, and emits only one detail report.
+- tests/liepin-content.test.ts: leased detail waits for the page `load` event before emitting `DETAIL_READY`, and content preflight waits for delayed controls without opening a write path.
 - tests/liepin-content.test.ts: Chrome Reload runtime removal/rejection leaves no unhandled promise, stale detail reporting stops, and valid-context transport failures remain visible.
 - tests/liepin-risk-redirect-content.test.ts: hash and no-hash safe-Liepin redirects recover the original synthetic job identity and report `risk_control` immediately.
 - tests/liepin.test.ts and tests/liepin-content.test.ts: a synthetic platform stop banner is classified and reported immediately as `job_unavailable`.
@@ -454,6 +465,7 @@ For every contract change, update the nearest focused test and rerun the full ga
 - tests/options-ui.test.ts: stored retry busy/duplicate/success/failure behavior and record refresh.
 - tests/reviewed-send-content.test.ts: successful preflight lease and draft hash are mandatory before execute.
 - tests/liepin.test.ts: primary/secondary action tiering, open-chat reuse, ancestor-hidden rejection, current `.im-ui-*` surface binding, open ShadowRoot and same-origin iframe traversal, rendered-but-disabled send controls, sibling message-list read-back from `.im-ui-chat-container`, delayed federated-IM rendering with a virtual clock, disabled composer, selected resume confirmation, exact message/resume evidence, and false-positive rejection.
+- tests/liepin.test.ts: job-bound action and composer focus precede native click/input behavior; no synthetic event is treated as trusted platform evidence.
 - tests/liepin.test.ts: exact and verified eight-digit action-ID suffix binding rejects unrelated recommendation controls.
 - tests/options-ui.test.ts: generic record commands and reviewed-send controls acknowledge clicks synchronously, disable while pending, and reject duplicate clicks.
 - tests/batch-persistence.test.ts: automatic draft recovery skips repeated detail persistence, accepts only server-revalidated projection repair, auto-opens missing reviewed-send tabs, and reloads only an exact stale tab.
@@ -558,4 +570,18 @@ const send = [...document.querySelectorAll("button,a")].find((node) => node.text
 const root = uniqueVisibleRoot(document, ".im-ui-chat-input");
 const composer = uniqueVisibleDescendant(root, "textarea.im-ui-textarea");
 const send = uniqueVisibleDescendant(root, ".im-ui-basic-send-btn");
+~~~
+
+For page lifecycle and control interaction, preserve the browser boundary:
+
+~~~typescript
+// Wrong: document_idle is treated as fully settled and a lone event is dispatched.
+element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+// Correct: wait for bounded page readiness, focus the visible control, and use
+// its native click semantics. This improves compatibility but does not evade
+// `isTrusted` checks or risk controls.
+await waitForPageReady();
+element.focus({ preventScroll: true });
+element.click();
 ~~~

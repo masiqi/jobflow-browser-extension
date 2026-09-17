@@ -182,6 +182,34 @@ describe("side-panel scan interaction", () => {
     expect((document.querySelector("#scan") as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("refreshes state with immediate busy feedback and a completion message", async () => {
+    const state = appState(preview(1));
+    let getStateCalls = 0;
+    let releaseRefresh!: () => void;
+    const pendingRefresh = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    const sendMessage = vi.fn(async (request: { type: string }) => {
+      if (request.type !== "GET_APP_STATE") return { ok: true };
+      getStateCalls += 1;
+      if (getStateCalls === 2) await pendingRefresh;
+      return { ok: true, data: state };
+    });
+    await openSidePanel(sendMessage);
+
+    const refresh = document.querySelector("#refresh") as HTMLButtonElement;
+    refresh.click();
+    await vi.waitFor(() => expect(getStateCalls).toBe(2));
+    expect(refresh.disabled).toBe(true);
+    expect(refresh.getAttribute("aria-busy")).toBe("true");
+    expect(document.querySelector("#scanStatus")?.textContent).toContain("正在刷新状态");
+
+    releaseRefresh();
+    await vi.waitFor(() => expect(document.querySelector("#scanStatus")?.textContent).toContain("状态已刷新"));
+    expect((document.querySelector("#refresh") as HTMLButtonElement).disabled).toBe(false);
+    expect(document.querySelector("#refresh")?.getAttribute("aria-busy")).toBe("false");
+  });
+
   it("distinguishes an empty scan from an unstarted scan", async () => {
     const state = appState(preview(0));
     const sendMessage = vi.fn(async (request: { type: string }) =>
@@ -209,7 +237,7 @@ describe("side-panel scan interaction", () => {
     const inputs = [...document.querySelectorAll<HTMLInputElement>("[data-job-id]")];
     inputs[1]!.click();
     inputs[2]!.click();
-    expect(document.querySelector("#selectionSummary")?.textContent).toContain("已选 1 / 上限 10");
+    expect(document.querySelector("#selectionSummary")?.textContent).toContain("已选 1");
     (document.querySelector("#start") as HTMLButtonElement).click();
 
     await vi.waitFor(() => expect(document.querySelector(".run")?.textContent).toContain("0/1"));
@@ -246,6 +274,55 @@ describe("side-panel scan interaction", () => {
         selectedJobIds: scanPreview.candidates.map((candidate) => candidate.jobId),
         expectedExecutionPolicy: "automatic_send"
       });
+  });
+
+  it("selects and clears only processable jobs with the master checkbox", async () => {
+    const scanPreview = preview(3);
+    scanPreview.processableJobIds = scanPreview.candidates.slice(0, 2).map((candidate) => candidate.jobId);
+    scanPreview.selectedJobIds = [scanPreview.candidates[0]!.jobId];
+    const state = appState(scanPreview);
+    const sendMessage = vi.fn(async (request: { type: string }) =>
+      request.type === "GET_APP_STATE" ? { ok: true, data: state } : { ok: true });
+    await openSidePanel(sendMessage);
+
+    const selectAll = document.querySelector("#selectAll") as HTMLInputElement;
+    expect(selectAll.checked).toBe(false);
+    expect(selectAll.indeterminate).toBe(true);
+    expect(document.querySelector<HTMLInputElement>(`[data-job-id="${scanPreview.candidates[2]!.jobId}"]`)?.disabled)
+      .toBe(true);
+
+    selectAll.click();
+    expect(selectAll.checked).toBe(true);
+    expect(selectAll.indeterminate).toBe(false);
+    expect([...document.querySelectorAll<HTMLInputElement>("[data-job-id]:checked")].map((input) => input.dataset.jobId))
+      .toEqual(scanPreview.processableJobIds);
+
+    selectAll.click();
+    expect(selectAll.checked).toBe(false);
+    expect(selectAll.indeterminate).toBe(false);
+    expect(document.querySelectorAll<HTMLInputElement>("[data-job-id]:checked")).toHaveLength(0);
+  });
+
+  it("submits every selected job beyond the retired batch setting", async () => {
+    const scanPreview = preview(21);
+    let state = appState(scanPreview);
+    const submitted: string[][] = [];
+    const sendMessage = vi.fn(async (request: { type: string; selectedJobIds?: string[] }) => {
+      if (request.type === "GET_APP_STATE") return { ok: true, data: state };
+      if (request.type === "START_BATCH") {
+        submitted.push(request.selectedJobIds ?? []);
+        state = { ...state, run: batchRun(scanPreview, request.selectedJobIds ?? []) };
+        return { ok: true, data: state.run };
+      }
+      return { ok: true };
+    });
+    await openSidePanel(sendMessage);
+
+    expect(document.querySelector("#selectionSummary")?.textContent).toBe("已选 21");
+    expect((document.querySelector("#start") as HTMLButtonElement).disabled).toBe(false);
+    (document.querySelector("#start") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(submitted).toHaveLength(1));
+    expect(submitted[0]).toEqual(scanPreview.candidates.map((candidate) => candidate.jobId));
   });
 
   it("enters a start-batch busy state before awaiting and blocks duplicate starts", async () => {

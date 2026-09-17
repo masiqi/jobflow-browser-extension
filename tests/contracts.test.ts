@@ -47,9 +47,16 @@ describe("runtime and endpoint contracts", () => {
       selectedJobIds: ["one"],
       mode: "live"
     })).toThrow();
-    expect(() => decodeRuntimeRequest({
+    const acceptedBatch = decodeRuntimeRequest({
       type: "START_BATCH",
       selectedJobIds: Array.from({ length: 21 }, (_, index) => String(index)),
+      expectedExecutionPolicy: "reviewed_send"
+    });
+    expect(acceptedBatch.type).toBe("START_BATCH");
+    if (acceptedBatch.type === "START_BATCH") expect(acceptedBatch.selectedJobIds).toHaveLength(21);
+    expect(() => decodeRuntimeRequest({
+      type: "START_BATCH",
+      selectedJobIds: Array.from({ length: 501 }, (_, index) => String(index)),
       expectedExecutionPolicy: "reviewed_send"
     })).toThrow();
   });

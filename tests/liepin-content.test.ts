@@ -53,6 +53,37 @@ it("obtains a detail lease by handshake when the detail URL has no hash", async 
   })));
 });
 
+it("waits for the page load event before reporting leased detail content", async () => {
+  const originalReadyState = document.readyState;
+  Object.defineProperty(document, "readyState", { configurable: true, value: "interactive" });
+  const sendMessage = vi.fn(async (request: { type: string }) => {
+    if (request.type === "GET_LAUNCHER_VISIBILITY") return { ok: true, data: false };
+    if (request.type === "DETAIL_READY") return { ok: true };
+    return { ok: true };
+  });
+  vi.stubGlobal("chrome", {
+    runtime: {
+      sendMessage,
+      onMessage: { addListener: vi.fn() }
+    }
+  });
+
+  try {
+    await import("../src/content/liepin");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: "DETAIL_READY" }));
+
+    Object.defineProperty(document, "readyState", { configurable: true, value: "complete" });
+    window.dispatchEvent(new Event("load"));
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: "DETAIL_READY",
+      leaseId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    })), { timeout: 1000 });
+  } finally {
+    Object.defineProperty(document, "readyState", { configurable: true, value: originalReadyState });
+  }
+});
+
 it("retries the detail lease handshake briefly and reports detail only once", async () => {
   vi.useFakeTimers();
   history.replaceState(null, "", "https://www.liepin.com/a/1980000301.shtml");

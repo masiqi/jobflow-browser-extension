@@ -96,7 +96,7 @@ const QUEUE_ALARM = "jobflow:queue";
 const DETAIL_ALARM_PREFIX = "jobflow:detail:";
 const AUTO_WRITE_ALARM_PREFIX = "jobflow:auto-write:";
 const REVIEWED_SEND_LEASE_TTL_MS = 5 * 60 * 1000;
-const REVIEWED_SEND_CONTENT_READY_TIMEOUT_MS = 15_000;
+const REVIEWED_SEND_CONTENT_READY_TIMEOUT_MS = 30_000;
 const REVIEWED_SEND_CONTENT_RETRY_INTERVAL_MS = 250;
 const DELIVERY_CONTENT_TIMEOUT_MS = 120_000;
 
@@ -270,7 +270,6 @@ async function scanCurrentTab(): Promise<ScanPreview> {
   const existing = await listOpportunities();
   const existingByKey = new Map(existing.map((item) => [item.platform + ":" + item.platformJobId, item]));
   const stored = await upsertCandidates(result.candidates);
-  const settings = await loadSettings();
   const processable = result.candidates.filter((candidate) => {
     const prior = existingByKey.get(jobKey(candidate));
     return !prior || prior.status === "discovered" || prior.status === "failed";
@@ -288,7 +287,7 @@ async function scanCurrentTab(): Promise<ScanPreview> {
     ).length,
     draftedCount: stored.filter((item) => item.status === "draft_ready").length,
     processableJobIds: processable.map((item) => item.jobId),
-    selectedJobIds: processable.slice(0, settings.maxJobsPerBatch).map((item) => item.jobId)
+    selectedJobIds: processable.map((item) => item.jobId)
   };
   await saveScanPreview(preview);
   await notifyState();
@@ -355,9 +354,6 @@ async function startBatch(
   const processable = new Set(preview.processableJobIds);
   if (selectedJobIds.some((jobId) => !processable.has(jobId))) {
     throw new Error("只能选择尚未处理的新职位");
-  }
-  if (selectedJobIds.length > settings.maxJobsPerBatch || selectedJobIds.length > 20) {
-    throw new Error("本批职位数量超过设置上限");
   }
   const auth = await getAuthProjection();
   if (settings.model.route === "byok"

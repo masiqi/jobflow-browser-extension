@@ -47,7 +47,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
     rememberKey: false
   },
   executionPolicy: "reviewed_send",
-  maxJobsPerBatch: 10,
+  maxJobsPerBatch: 500,
   dailySendLimit: 150,
   automaticSendDelayMinSeconds: 10,
   automaticSendDelayMaxSeconds: 20,

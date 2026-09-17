@@ -179,6 +179,53 @@ describe("Liepin list extraction", () => {
     ]));
   });
 
+  it("focuses job-bound controls before invoking their native click behavior", async () => {
+    const draft = "您好，这是一条需要先聚焦控件再发送的合成招呼语。";
+    const events: string[] = [];
+    document.body.innerHTML = `
+      <main>
+        <button class="btn-main" data-selector="chat-chat" data-jobid="1980000301">聊一聊</button>
+        <section id="chat"></section>
+      </main>`;
+    const action = document.querySelector<HTMLButtonElement>(".btn-main")!;
+    action.addEventListener("focus", () => events.push("action-focus"));
+    action.addEventListener("click", () => {
+      events.push("action-click");
+      document.querySelector("#chat")!.innerHTML = `
+        <section class="chat-panel">
+          <div data-jobid="1980000301">已投递 1980000301</div>
+          <textarea class="chat-composer"></textarea>
+          <button class="chat-send" disabled>发送</button>
+          <div class="messages"></div>
+        </section>`;
+      const composer = document.querySelector<HTMLTextAreaElement>(".chat-composer")!;
+      composer.addEventListener("focus", () => events.push("composer-focus"));
+      composer.addEventListener("input", () => {
+        (document.querySelector(".chat-send") as HTMLButtonElement).disabled = false;
+      });
+      document.querySelector(".chat-send")?.addEventListener("click", () => {
+        events.push("send-click");
+        const bubble = document.createElement("div");
+        bubble.className = "message-self";
+        bubble.textContent = composer.value;
+        document.querySelector(".messages")?.append(bubble);
+      });
+    });
+
+    const result = await executeLiepinReviewedSend(
+      document,
+      "https://www.liepin.com/a/1980000301.shtml",
+      "1980000301",
+      draft
+    );
+
+    expect(result).toMatchObject({ ok: true, application: "verified", greeting: "verified" });
+    expect(events.indexOf("action-focus")).toBeGreaterThanOrEqual(0);
+    expect(events.indexOf("action-focus")).toBeLessThan(events.indexOf("action-click"));
+    expect(events.indexOf("composer-focus")).toBeGreaterThan(events.indexOf("action-click"));
+    expect(events.indexOf("composer-focus")).toBeLessThan(events.indexOf("send-click"));
+  });
+
   it("does not fill or resend a greeting that is already verified", async () => {
     let sendClicks = 0;
     document.body.innerHTML = `

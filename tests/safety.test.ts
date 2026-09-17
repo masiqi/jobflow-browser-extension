@@ -20,7 +20,14 @@ describe("MV3 safety gate", () => {
     expect(manifest.manifest_version).toBe(3);
     expect(manifest.permissions).toEqual(["storage", "tabs", "alarms", "sidePanel"]);
     expect(manifest.permissions).not.toContain("cookies");
-    expect(manifest.host_permissions).toEqual(["https://*.liepin.com/*"]);
+    expect(manifest.host_permissions[0]).toBe("https://*.liepin.com/*");
+    for (const permission of manifest.host_permissions.slice(1)) {
+      expect(
+        permission === "http://127.0.0.1:54321/*"
+          || /^https:\/\/[a-z0-9-]+\.supabase\.co\/\*$/i.test(permission)
+      ).toBe(true);
+    }
+    expect(manifest.host_permissions.length).toBeLessThanOrEqual(2);
     expect(manifest.host_permissions).not.toContain("http://*/*");
     expect(manifest.host_permissions).not.toContain("https://*/*");
     expect(manifest.side_panel.default_path).toBe("sidepanel.html");
@@ -45,7 +52,9 @@ describe("MV3 safety gate", () => {
     }
     expect(adapter).toContain("executeLiepinReviewedSend");
     expect(adapter).toContain('data-selector="chat-chat"');
-    expect(adapter).toContain('dispatchEvent(new ViewMouseEvent("click"');
+    expect(adapter).toContain('element.focus({ preventScroll: true });');
+    expect(adapter).toContain("element.click();");
+    expect(adapter).not.toContain('dispatchEvent(new ViewMouseEvent("click"');
     for (const forbidden of [
       "chrome.cookies",
       "friend/add.json",

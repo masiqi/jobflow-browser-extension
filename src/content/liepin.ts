@@ -27,6 +27,9 @@ type RuntimeMessageResult<T> =
   | { kind: "transport_error"; error: string };
 
 const REVIEWED_SEND_PREFLIGHT_TTL_MS = 5 * 60 * 1000;
+const DETAIL_PAGE_LOAD_TIMEOUT_MS = 10_000;
+const PREFLIGHT_CONTROL_WAIT_TIMEOUT_MS = 10_000;
+const STABLE_FRAME_FALLBACK_MS = 100;
 const DETAIL_LEASE_HANDSHAKE_ATTEMPTS = 20;
 const DETAIL_LEASE_HANDSHAKE_INTERVAL_MS = 250;
 const reviewedSendPreflights = new Map<string, { platformJobId: string; preparedAt: number }>();
@@ -115,28 +118,30 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     return false;
   }
   if (type === "CONTENT_REVIEWED_SEND_PREFLIGHT") {
-    try {
-      const command = liepinReviewedSendPreflightCommandSchema.parse(message);
-      const result = preflightLiepinReviewedSend(document, location.href, command.platformJobId);
-      if (result.ok) {
-        reviewedSendPreflights.set(command.leaseId, {
-          platformJobId: command.platformJobId,
-          preparedAt: Date.now()
+    void (async () => {
+      try {
+        const command = liepinReviewedSendPreflightCommandSchema.parse(message);
+        const result = await preflightAfterPageReady(command.platformJobId);
+        if (result.ok) {
+          reviewedSendPreflights.set(command.leaseId, {
+            platformJobId: command.platformJobId,
+            preparedAt: Date.now()
+          });
+        } else {
+          reviewedSendPreflights.delete(command.leaseId);
+        }
+        sendResponse(result);
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          platformJobId: "",
+          resumeMode: "platform_default",
+          blocker: "missing_action",
+          reason: error instanceof Error ? "发送前检查命令无效" : "发送前检查失败"
         });
-      } else {
-        reviewedSendPreflights.delete(command.leaseId);
       }
-      sendResponse(result);
-    } catch (error) {
-      sendResponse({
-        ok: false,
-        platformJobId: "",
-        resumeMode: "platform_default",
-        blocker: "missing_action",
-        reason: error instanceof Error ? "发送前检查命令无效" : "发送前检查失败"
-      });
-    }
-    return false;
+    })();
+    return true;
   }
   if (type === "CONTENT_REVIEWED_SEND_EXECUTE") {
     void (async () => {
@@ -218,6 +223,70 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function nextRenderFrame(): Promise<void> {
+  if (typeof window.requestAnimationFrame === "function") {
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer: number | undefined;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) window.clearTimeout(timer);
+        resolve();
+      };
+      timer = window.setTimeout(finish, STABLE_FRAME_FALLBACK_MS);
+      window.requestAnimationFrame(finish);
+    });
+  }
+  return delay(0);
+}
+
+async function waitForStablePage(): Promise<void> {
+  await nextRenderFrame();
+  await nextRenderFrame();
+}
+
+async function waitForPageReady(): Promise<boolean> {
+  if (document.readyState === "complete") {
+    await waitForStablePage();
+    return true;
+  }
+  const loaded = await new Promise<boolean>((resolve) => {
+    let settled = false;
+    let timer: number | undefined;
+    const finish = (value: boolean): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      window.removeEventListener("load", onLoad);
+      resolve(value);
+    };
+    const onLoad = (): void => finish(true);
+    window.addEventListener("load", onLoad, { once: true });
+    timer = window.setTimeout(() => finish(false), DETAIL_PAGE_LOAD_TIMEOUT_MS);
+    if ((document.readyState as string) === "complete") finish(true);
+  });
+  await waitForStablePage();
+  if (!loaded) {
+    console.warn("[JobFlow:detail-lifecycle] 页面 load 事件未在限定时间内完成", {
+      readyState: document.readyState,
+      visibilityState: document.visibilityState
+    });
+  }
+  return loaded || (document.readyState as string) === "complete";
+}
+
+async function preflightAfterPageReady(platformJobId: string): Promise<ReturnType<typeof preflightLiepinReviewedSend>> {
+  await waitForPageReady();
+  let result = preflightLiepinReviewedSend(document, location.href, platformJobId);
+  const deadline = Date.now() + PREFLIGHT_CONTROL_WAIT_TIMEOUT_MS;
+  while (!result.ok && result.blocker === "missing_action" && Date.now() < deadline) {
+    await delay(250);
+    result = preflightLiepinReviewedSend(document, location.href, platformJobId);
+  }
+  return result;
+}
+
 async function requestDetailLease(jobId: string): Promise<{ leaseId: string | null; shouldRetry: boolean }> {
   if (!jobId) return { leaseId: null, shouldRetry: false };
   const result = await sendRuntimeMessage<unknown>({
@@ -283,6 +352,7 @@ async function reportLeasedDetail(): Promise<void> {
     await reportDetailFailure("unexpected_redirect", jobId, leaseId, "猎聘详情页跳转到无法识别的页面");
     return;
   }
+  await waitForPageReady();
   for (let attempt = 0; attempt < 30; attempt += 1) {
     const currentBlocker = detectLiepinBlockedPage();
     if (currentBlocker) {

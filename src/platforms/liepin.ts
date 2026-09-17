@@ -237,14 +237,20 @@ export function preflightLiepinReviewedSend(
 }
 
 function dispatchAllowedClick(element: HTMLElement): void {
-  const ViewMouseEvent = element.ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
-  element.dispatchEvent(new ViewMouseEvent("click", {
-    bubbles: true,
-    cancelable: true
-  }));
+  try {
+    element.focus({ preventScroll: true });
+  } catch {
+    element.focus();
+  }
+  element.click();
 }
 
 function setTextControlValue(element: HTMLElement, value: string): void {
+  try {
+    element.focus({ preventScroll: true });
+  } catch {
+    element.focus();
+  }
   const view = element.ownerDocument.defaultView;
   const isTextArea = Boolean(view && element instanceof view.HTMLTextAreaElement);
   const isInput = Boolean(view && element instanceof view.HTMLInputElement);

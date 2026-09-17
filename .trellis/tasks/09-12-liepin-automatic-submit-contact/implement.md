@@ -14,8 +14,10 @@
 - [x] Add minimum/maximum automatic interval settings and a uniform inclusive secure-random helper with a deterministic test seam.
 - [x] Add the management-page segmented control and enforce `draft_only` against manual live controls.
 - [x] Update the side-panel policy status, selected-count action label, immediate busy state, and explicit automatic real-write styling.
+- [x] Add processable-job select-all controls and remove the obsolete per-batch selection limit while retaining the 500-item scan snapshot cap.
 - [x] Give management command buttons immediate action-specific busy state and enforce one user generation in flight per opportunity.
 - [x] Keep list scanning and selection transient state unchanged; submit exactly the displayed selected IDs.
+- [x] Wait for normal detail page load/stable rendering and use focused native Liepin control clicks without weakening risk-control handoff.
 
 ## 3. Durable Batch State
 
@@ -67,6 +69,7 @@
 ## 8. Verification And Documentation
 
 - [x] Update side-panel, options, domain, contracts, storage, background integration, content, Liepin adapter, safety, and Supabase tests with synthetic fixtures.
+- [x] Add regressions for delayed detail load/preflight controls and focus-before-native-click interaction.
 - [x] Update README, ADR 0001/0002/0017, cross-layer spec, glossary if terminology changes, and tracked default `dist`.
 - [x] Run `npm run verify`, database tests/lint, local Edge integration, extension smoke, both audit paths, secret/personal-data scans, and `git diff --check`.
 - [ ] Rebuild local Supabase `dist`, Reload Chrome, refresh Liepin, and manually accept 1-3 items: one non-write outcome, one verified success, and one safe pause path before describing automatic mode as accepted.

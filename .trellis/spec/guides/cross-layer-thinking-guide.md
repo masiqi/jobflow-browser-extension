@@ -100,6 +100,24 @@ create one owner for:
 
 Rendering code may format fields, but it must not redefine the payload contract.
 
+### Mistake 5: Treating Browser Lifecycle Signals As User Interaction
+
+Content scripts at `document_idle` may still be waiting for `load`, async
+component mounts, or stable rendering. Background tabs can suspend
+`requestAnimationFrame`, and a scripted `click` never becomes a trusted user
+event. Before changing a timeout or selector, test the page lifecycle and the
+runtime response channel separately.
+
+**Good checklist**:
+
+- Wait for `load` with a finite bound, then use a timer-backed stable-render wait.
+- Keep content preflight asynchronous and return `true` from the runtime listener
+  while the response is pending.
+- Focus the validated job-bound control and call its native `click()` method;
+  never spoof `isTrusted`, browser fingerprints, or CAPTCHA interaction.
+- Add a fixture where the page/control appears late and assert no write occurs
+  while the lifecycle is incomplete.
+
 ---
 
 ## Checklist for Cross-Layer Features

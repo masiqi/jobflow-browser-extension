@@ -48,6 +48,7 @@ section { padding: 14px; border-bottom: 1px solid #d8dee6; background: #fff; }
 }
 .icon-button:disabled { opacity: .38; cursor: default; }
 .icon-button:focus-visible, button:focus-visible, input:focus-visible { outline: 3px solid #efb443; outline-offset: 2px; }
+.icon-button[data-busy="true"] svg { animation: icon-spin 0.8s linear infinite; }
 .scan-button { min-width: 116px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; white-space: nowrap; }
 .scan-button[data-busy="true"]::before {
   content: "";
@@ -67,13 +68,19 @@ section { padding: 14px; border-bottom: 1px solid #d8dee6; background: #fff; }
 .scan-status.error { color: #9c342e; background: #f8e5e3; border-color: #e4bbb7; }
 .scan-empty { color: #795c19; background: #fff7e3; border: 1px solid #ead7a3; border-radius: 5px; padding: 10px; line-height: 1.45; }
 @keyframes scan-spin { to { transform: rotate(360deg); } }
+@keyframes icon-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   .scan-button[data-busy="true"]::before { animation: none; }
+  .icon-button[data-busy="true"] svg { animation: none; }
 }
 .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin: 8px 0 12px; }
 .metrics div { min-width: 0; padding: 8px 4px; text-align: center; border: 1px solid #dce2e9; border-radius: 5px; background: #f8fafb; }
 .metrics strong { display: block; font-size: 16px; }
 .metrics span { display: block; color: #6b7785; white-space: nowrap; font-size: 11px; }
+.candidate-toolbar { min-height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 9px 7px; }
+.select-all { display: inline-flex; align-items: center; gap: 7px; color: #315066; cursor: pointer; }
+.select-all input { margin: 0; }
+.candidate-toolbar small { color: #6b7785; white-space: nowrap; }
 .candidate-list { max-height: 240px; overflow: auto; border: 1px solid #dce2e9; border-radius: 5px; }
 .candidate { min-height: 52px; display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: center; padding: 7px 9px; border-bottom: 1px solid #e8ecf0; }
 .candidate:last-child { border-bottom: 0; }
@@ -81,8 +88,6 @@ section { padding: 14px; border-bottom: 1px solid #d8dee6; background: #fff; }
 .candidate b, .record b { display: block; overflow-wrap: anywhere; }
 .candidate small, .record small { display: block; margin-top: 3px; overflow-wrap: anywhere; }
 .batch-row { min-height: 50px; display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 10px; margin-top: 10px; }
-.batch-row label { color: #65717f; }
-.batch-row input { display: block; width: 74px; height: 32px; margin-top: 4px; border: 1px solid #bbc5cf; border-radius: 5px; padding: 0 8px; }
 .batch-start { display: flex; flex: 1 1 190px; min-width: 0; align-items: end; justify-content: flex-end; gap: 9px; }
 .batch-start small { min-width: 88px; padding-bottom: 8px; text-align: right; white-space: nowrap; }
 button.primary { min-height: 34px; border: 0; border-radius: 5px; background: #1d6d50; color: #fff; padding: 7px 14px; font-weight: 650; cursor: pointer; }

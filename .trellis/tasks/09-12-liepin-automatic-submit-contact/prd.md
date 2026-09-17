@@ -33,6 +33,7 @@ Allow a job seeker to choose an `automatic_send` execution policy so that one se
 - In automatic mode the primary action is labeled as a real one-click submit-and-contact action and includes the selected count. Clicking it is the single authorization for that selected batch; there is no per-item confirmation.
 - Changing filters, opening or refreshing the result page, opening the side panel, scanning, and changing the execution-policy setting perform zero Liepin writes.
 - Process selected opportunities serially with at most one extension-owned detail tab.
+- The detail content script lets the browser finish its normal `load` lifecycle, waits for two bounded render turns, and waits for delayed job-bound controls during read-only preflight. It does not intercept resources, spoof trusted events, or bypass login/CAPTCHA/risk-control pages.
 - Run deterministic JD rules before any suitability or greeting model call.
 - Send nothing for deterministic exclusions, model exclusions, `review`, invalid model output, missing profile facts, or an invalid or unsafe greeting.
 - When deterministic rules pass, the suitability result is validated as `proceed`, and the greeting is validated and persisted, automatically execute submit-and-contact for that same opportunity.
@@ -50,7 +51,7 @@ Allow a job seeker to choose an `automatic_send` execution policy so that one se
 
 - Apply the existing per-user Liepin daily limit, default 150 and configurable from 1 through 500, using the Asia/Shanghai calendar day.
 - Reserve one daily unit immediately before the first possible platform write for an opportunity; release it only if no write starts; reuse it for evidence-aware recovery of that opportunity.
-- The existing batch limit remains 1 through 20 and is separate from the daily live limit.
+- The current scan snapshot remains capped at 500 candidates for payload safety, but there is no separate per-batch selection limit; every explicitly selected processable opportunity enters the queue. This is separate from the daily live limit.
 - Apply a configurable randomized interval between consecutive opportunities that reach the real Liepin write boundary. An automatic write may start immediately only when this owner/platform has no unexpired current-device throttle.
 - Expose separate minimum and maximum interval inputs. Default to 10 and 20 seconds, require both values to be integers from 5 through 600, and require minimum to be no greater than maximum.
 - Select each interval uniformly from the inclusive configured range.
@@ -80,6 +81,7 @@ Allow a job seeker to choose an `automatic_send` execution policy so that one se
 - [ ] `draft_only` and `reviewed_send` batch generation retain their current no-live-write behavior.
 - [ ] A selected automatic batch processes every selected opportunity serially; an exclusion or review on one item does not block the next item.
 - [ ] The side panel displays the recognized jobs and counts before live work; exactly one explicit batch button starts automatic submit-and-contact for the selected IDs.
+- [ ] The side panel offers a master checkbox that selects or clears only processable jobs, and the batch action accepts every selected ID up to the 500-candidate snapshot cap.
 - [ ] A validated `proceed` opportunity with a valid generated greeting enters the job-bound Liepin submit-and-contact path without per-item confirmation.
 - [ ] A non-`proceed` or invalid item performs zero Liepin writes and exposes its reason.
 - [ ] Quota exhaustion stops before a platform write and is visible in the batch result.
@@ -89,6 +91,7 @@ Allow a job seeker to choose an `automatic_send` execution policy so that one se
 - [ ] Starting another batch or completing a reviewed send cannot bypass the current-device account/platform next-write timestamp.
 - [ ] Non-write exclusions, reviews, and model or greeting validation failures continue to the next selected opportunity.
 - [ ] Login, risk-control, CAPTCHA, resume ambiguity, unknown DOM, quota exhaustion, and post-write ambiguity pause the batch with an item-level reason.
+- [ ] Detail extraction and preflight tolerate normal page-load/async-control timing without reclassifying a lifecycle delay as platform success; risk-control pages remain an explicit user handoff.
 - [ ] Each automatic item records separate application and greeting evidence; normal platform-read verification and development click-assumed completion use distinct evidence codes, and both completed components produce complete delivery.
 - [ ] Partial or ambiguous post-write outcomes are never automatically replayed; verified components remain immutable.
 - [ ] Changing the setting alone, opening or filtering a result page, scanning, opening a saved job, reloading Chrome, or viewing an existing draft cannot trigger a send.
