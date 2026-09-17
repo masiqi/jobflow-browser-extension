@@ -117,20 +117,28 @@ export function isZhaopinDetailPage(location: LocationLike = window.location): b
 
 export type ZhaopinBlockedPage = "login_required" | "risk_control" | "job_unavailable";
 
+function hasZhaopinDetailContent(root: ParentNode): boolean {
+  return Boolean(root.querySelector(
+    "h1.summary-planes__title, .job-header__title, .jobinfo__name, .job-detail__title, .describtion-card, .job-description, .jobdescription"
+  ));
+}
+
 export function detectZhaopinBlockedPage(
   root: ParentNode = document,
   pageLocation: LocationLike = window.location
 ): ZhaopinBlockedPage | null {
   const source = bodyText(root).slice(0, 20_000);
   const title = root instanceof Document ? normalizeText(root.title) : "";
+  const hasDetail = hasZhaopinDetailContent(root);
   if (/(?:职位|岗位).*(?:已下线|不存在|已结束|暂停招聘|停止招聘|已关闭)|当前职位审核中或已下线/.test(source)) {
     return "job_unavailable";
   }
-  if (/安全验证|验证码|访问异常|操作频繁|风险提示|滑块验证|人机验证/.test(source)
-    || /安全验证|风险提示|验证/.test(title)) {
+  if (/安全验证|访问异常|操作频繁|风险提示|滑块验证|人机验证/.test(source)
+    || /安全中心|安全验证|风险提示/.test(title)
+    || (!hasDetail && /(?:请输入|请完成|需要).{0,12}(?:验证码|验证)/.test(source))) {
     return "risk_control";
   }
-  if (/登录后查看|请先登录|立即登录|扫码登录|登录\/注册|手机号登录/.test(source)) {
+  if (!hasDetail && /登录后查看|请先登录|立即登录|扫码登录|登录\/注册|手机号登录/.test(source)) {
     return "login_required";
   }
   return null;
@@ -235,6 +243,9 @@ export function scanZhaopinList(
 function descriptionFromSelectors(root: ParentNode): string {
   const selectors = [
     ".describtion__detail",
+    ".describtion-card",
+    ".describtion-card__content",
+    ".seo-card__content",
     ".job-description",
     ".jobdescription",
     ".job-detail__content",
@@ -269,7 +280,7 @@ function descriptionFromHeading(root: ParentNode): string {
 }
 
 function detailTitle(root: ParentNode): string {
-  const title = firstText(root, [".job-header__title", ".jobinfo__name", ".job-detail__title", "h1"]);
+  const title = firstText(root, [".job-header__title", ".summary-planes__title", ".jobinfo__name", ".job-detail__title", "h1"]);
   if (title) return title;
   const documentTitle = root instanceof Document ? normalizeText(root.title) : "";
   return documentTitle.split(/[-|｜]/)[0]?.replace(/招聘信息|招聘$/, "").trim() || "";

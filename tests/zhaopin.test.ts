@@ -199,8 +199,22 @@ describe("Zhaopin detail extraction", () => {
     expect(() => detailJobSchema.parse(item)).not.toThrow();
   });
 
+  it("does not treat the normal detail-page login widget as a blocker", () => {
+    document.body.innerHTML = `
+      <main class="main-jobs">
+        <section class="job-summary"><h1 class="summary-planes__title">真实详情职位</h1></section>
+        <section class="describtion-card seo-card"><h3>职位描述</h3><div class="seo-card__content">负责平台研发和稳定性建设，参与服务治理与工程效率改进。</div></section>
+        <aside class="main-jobs__right-content"><div class="login-before">验证码登录/注册 登录/注册</div></aside>
+      </main>`;
+    expect(detectZhaopinBlockedPage()).toBeNull();
+    expect(extractZhaopinDetail(document, "https://www.zhaopin.com/jobdetail/CCL1501502560J40877030814.htm"))
+      .toMatchObject({ title: "真实详情职位", jobId: "CCL1501502560J40877030814" });
+  });
+
   it("classifies login, risk, and unavailable pages without trying to recover them", () => {
     document.body.innerHTML = "<main>请先登录，登录后查看完整职位信息</main>";
+    expect(detectZhaopinBlockedPage()).toBe("login_required");
+    document.body.innerHTML = "<main>验证码登录/注册 登录/注册</main>";
     expect(detectZhaopinBlockedPage()).toBe("login_required");
     document.body.innerHTML = "<main>访问异常，请完成安全验证</main>";
     expect(detectZhaopinBlockedPage()).toBe("risk_control");
