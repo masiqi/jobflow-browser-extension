@@ -12,7 +12,8 @@
     "test:db": "supabase test db",
     "test:edge": "node scripts/test-supabase-integration.mjs",
     "verify:full": "npm run verify && npm run test:db",
-    "smoke:extension": "node scripts/smoke-extension.mjs"
+    "smoke:extension": "node scripts/smoke-extension.mjs",
+    "start:local": "node scripts/start-local.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",

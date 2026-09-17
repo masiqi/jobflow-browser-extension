@@ -238,6 +238,14 @@ supabase test db
 supabase functions serve model-gateway
 ~~~
 
+也可以使用一键本地启动脚本。它只重启当前仓库对应的 Supabase 项目，保留数据库数据卷，停止并重新启动当前目录下的 `model-gateway`，等待本地 API/Function 就绪，再用 `.env.local` 的公开 `PUBLISHABLE_KEY` 重建 `dist`：
+
+~~~bash
+npm run start:local
+~~~
+
+脚本不会执行 `supabase db reset`，不会使用 `--no-verify-jwt`，不会停止其他 Supabase 项目，也不会杀掉其他目录下的进程。`model-gateway` 的日志写入系统临时目录；如果要提供日志排错，只需提供其中的脱敏错误信息，不要提供 Key、Authorization、简历或职位正文。
+
 Supabase CLI 会输出本地 API URL 和 PUBLISHABLE_KEY。不要把本地 SECRET_KEY、SERVICE_ROLE_KEY、JWT secret 或任何远程项目密钥写入源码、README、命令脚本、测试或 Git。
 
 在另一个终端用公开本地配置构建扩展：
