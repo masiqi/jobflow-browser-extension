@@ -1,4 +1,4 @@
-export type PlatformKey = "liepin";
+export type PlatformKey = "liepin" | "zhaopin";
 export type ResumeProfileState = "draft" | "active" | "stale";
 export type LocalResumeState = "available" | "missing" | "version_mismatch";
 export type RuleOutcome = "pass" | "exclude" | "review";

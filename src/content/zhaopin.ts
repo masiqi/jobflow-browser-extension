@@ -1,0 +1,267 @@
+import { BriefcaseBusiness, createElement } from "lucide";
+import {
+  detectZhaopinBlockedPage,
+  extractZhaopinDetail,
+  isZhaopinDetailPage,
+  isZhaopinListPage,
+  zhaopinBlockedPageReason,
+  zhaopinJobIdFromUrl,
+  scanZhaopinList
+} from "../platforms/zhaopin";
+import { type DetailFailureCode } from "../domain/messages";
+
+interface CommandResponse {
+  ok: boolean;
+  error?: string;
+  data?: unknown;
+}
+
+type RuntimeMessageResult<T> =
+  | { kind: "response"; value: T }
+  | { kind: "context_unavailable" }
+  | { kind: "transport_error"; error: string };
+
+const DETAIL_PAGE_LOAD_TIMEOUT_MS = 10_000;
+const STABLE_FRAME_FALLBACK_MS = 100;
+const DETAIL_LEASE_HANDSHAKE_ATTEMPTS = 20;
+const DETAIL_LEASE_HANDSHAKE_INTERVAL_MS = 250;
+
+function errorMessage(error: unknown, fallback: string): string {
+  return (error instanceof Error && error.message ? error.message : fallback).slice(0, 300);
+}
+
+function isExtensionContextInvalidated(error: unknown): boolean {
+  return error instanceof Error && /extension context invalidated/i.test(error.message);
+}
+
+async function sendRuntimeMessage<T>(message: object): Promise<RuntimeMessageResult<T>> {
+  const runtime = globalThis.chrome?.runtime;
+  if (!runtime || typeof runtime.sendMessage !== "function") return { kind: "context_unavailable" };
+  try {
+    return { kind: "response", value: await runtime.sendMessage(message) as T };
+  } catch (error) {
+    if (isExtensionContextInvalidated(error)) return { kind: "context_unavailable" };
+    return { kind: "transport_error", error: errorMessage(error, "扩展后台通信失败") };
+  }
+}
+
+function isCommandResponse(value: unknown): value is CommandResponse {
+  return !!value && typeof value === "object" && typeof (value as { ok?: unknown }).ok === "boolean";
+}
+
+function reportUnexpectedError(operation: string, error: unknown): void {
+  console.warn(`[JobFlow] ${operation}：${errorMessage(error, "未知错误")}`);
+}
+
+function mountLauncher(): void {
+  if (document.querySelector("#jobflow-launcher-root")) return;
+  const host = document.createElement("div");
+  host.id = "jobflow-launcher-root";
+  const shadow = host.attachShadow({ mode: "open" });
+  const button = document.createElement("button");
+  button.type = "button";
+  button.title = "打开 JobFlow";
+  button.setAttribute("aria-label", "打开 JobFlow 侧边栏");
+  button.append(createElement(BriefcaseBusiness, { width: 20, height: 20, "stroke-width": 2 }));
+  button.addEventListener("click", async () => {
+    const result = await sendRuntimeMessage<unknown>({ type: "OPEN_SIDE_PANEL" });
+    if (result.kind === "context_unavailable") return;
+    if (result.kind === "transport_error") {
+      button.title = result.error;
+      return;
+    }
+    if (!isCommandResponse(result.value) || !result.value.ok) {
+      button.title = isCommandResponse(result.value) ? result.value.error || "无法打开 JobFlow" : "扩展后台返回无效响应";
+    }
+  });
+  const style = document.createElement("style");
+  style.textContent = [
+    ":host{all:initial}",
+    "button{position:fixed;right:0;top:42%;z-index:2147483646;width:42px;height:42px;",
+    "display:grid;place-items:center;border:1px solid #b8c0cc;border-right:0;border-radius:6px 0 0 6px;",
+    "background:#17324d;color:#fff;box-shadow:0 4px 16px #0002;cursor:pointer}",
+    "button:hover{background:#20496d}",
+    "button:focus-visible{outline:3px solid #f2b84b;outline-offset:2px}",
+    "svg{display:block}"
+  ].join("");
+  shadow.append(style, button);
+  document.documentElement.append(host);
+}
+
+chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+  if (!message || typeof message !== "object") return false;
+  if ((message as { type?: unknown }).type !== "CONTENT_SCAN") return false;
+  if (!isZhaopinListPage()) {
+    sendResponse({ sourceUrl: location.href, candidates: [] });
+    return false;
+  }
+  sendResponse({ sourceUrl: location.href, candidates: scanZhaopinList() });
+  return false;
+});
+
+function leaseFromLocation(): string | null {
+  const value = new URLSearchParams(location.hash.slice(1)).get("jobflow-lease");
+  return value && /^[0-9a-f-]{36}$/i.test(value) ? value : null;
+}
+
+function jobIdFromLocation(): string {
+  const direct = zhaopinJobIdFromUrl(location.href);
+  if (direct) return direct;
+  const backUrl = new URLSearchParams(location.search).get("backurl");
+  return backUrl ? zhaopinJobIdFromUrl(backUrl) : "";
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function nextRenderFrame(): Promise<void> {
+  if (typeof window.requestAnimationFrame === "function") {
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer: number | undefined;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) window.clearTimeout(timer);
+        resolve();
+      };
+      timer = window.setTimeout(finish, STABLE_FRAME_FALLBACK_MS);
+      window.requestAnimationFrame(finish);
+    });
+  }
+  return delay(0);
+}
+
+async function waitForStablePage(): Promise<void> {
+  await nextRenderFrame();
+  await nextRenderFrame();
+}
+
+async function waitForPageReady(): Promise<boolean> {
+  if (document.readyState === "complete") {
+    await waitForStablePage();
+    return true;
+  }
+  const loaded = await new Promise<boolean>((resolve) => {
+    let settled = false;
+    let timer: number | undefined;
+    const finish = (value: boolean): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      window.removeEventListener("load", onLoad);
+      resolve(value);
+    };
+    const onLoad = (): void => finish(true);
+    window.addEventListener("load", onLoad, { once: true });
+    timer = window.setTimeout(() => finish(false), DETAIL_PAGE_LOAD_TIMEOUT_MS);
+    if ((document.readyState as string) === "complete") finish(true);
+  });
+  await waitForStablePage();
+  if (!loaded) {
+    console.warn("[JobFlow:zhaopin-detail-lifecycle] 页面 load 事件未在限定时间内完成", {
+      readyState: document.readyState,
+      visibilityState: document.visibilityState
+    });
+  }
+  return loaded || (document.readyState as string) === "complete";
+}
+
+async function requestDetailLease(jobId: string): Promise<{ leaseId: string | null; shouldRetry: boolean }> {
+  if (!jobId) return { leaseId: null, shouldRetry: false };
+  const result = await sendRuntimeMessage<unknown>({ type: "DETAIL_PAGE_READY", jobId });
+  if (result.kind === "context_unavailable") return { leaseId: null, shouldRetry: false };
+  if (result.kind === "transport_error") return { leaseId: null, shouldRetry: true };
+  return {
+    leaseId: isCommandResponse(result.value)
+      && result.value.ok
+      && typeof result.value.data === "string"
+      && /^[0-9a-f-]{36}$/i.test(result.value.data)
+      ? result.value.data
+      : null,
+    shouldRetry: true
+  };
+}
+
+async function detailLeaseForCurrentPage(): Promise<string | null> {
+  const hashLease = leaseFromLocation();
+  if (hashLease) return hashLease;
+  const jobId = jobIdFromLocation();
+  for (let attempt = 0; attempt < DETAIL_LEASE_HANDSHAKE_ATTEMPTS; attempt += 1) {
+    const result = await requestDetailLease(jobId);
+    if (result.leaseId) return result.leaseId;
+    if (!result.shouldRetry) return null;
+    if (attempt < DETAIL_LEASE_HANDSHAKE_ATTEMPTS - 1) await delay(DETAIL_LEASE_HANDSHAKE_INTERVAL_MS);
+  }
+  return null;
+}
+
+async function reportDetailFailure(code: DetailFailureCode, jobId: string, leaseId: string, error: string): Promise<void> {
+  const result = await sendRuntimeMessage<unknown>({ type: "DETAIL_FAILED", code, jobId, leaseId, error });
+  if (result.kind === "transport_error") reportUnexpectedError("智联招聘详情失败状态上报失败", result.error);
+}
+
+async function reportLeasedDetail(): Promise<void> {
+  const isDetailPage = isZhaopinDetailPage();
+  const blocked = detectZhaopinBlockedPage(document, location);
+  if (!isDetailPage && !blocked) return;
+  const jobId = jobIdFromLocation();
+  if (!jobId) return;
+  const leaseId = await detailLeaseForCurrentPage();
+  if (!leaseId) return;
+  if (blocked) {
+    await reportDetailFailure(blocked, jobId, leaseId, zhaopinBlockedPageReason(blocked));
+    return;
+  }
+  if (!isDetailPage) {
+    await reportDetailFailure("unexpected_redirect", jobId, leaseId, "智联招聘详情页跳转到无法识别的页面");
+    return;
+  }
+  await waitForPageReady();
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const currentBlocker = detectZhaopinBlockedPage();
+    if (currentBlocker) {
+      await reportDetailFailure(currentBlocker, jobId, leaseId, zhaopinBlockedPageReason(currentBlocker));
+      return;
+    }
+    const job = extractZhaopinDetail();
+    if (job) {
+      const result = await sendRuntimeMessage<unknown>({ type: "DETAIL_READY", job, leaseId });
+      if (result.kind === "context_unavailable") return;
+      if (result.kind === "transport_error") {
+        reportUnexpectedError("智联招聘详情数据上报失败", result.error);
+        return;
+      }
+      if (!isCommandResponse(result.value) || !result.value.ok) {
+        await reportDetailFailure(
+          "detail_rejected",
+          job.jobId,
+          leaseId,
+          ("详情数据未被接受：" + (isCommandResponse(result.value) ? result.value.error || "后台校验失败" : "后台返回无效响应")).slice(0, 500)
+        );
+      }
+      return;
+    }
+    await delay(1000);
+  }
+  await reportDetailFailure("dom_timeout", jobId, leaseId, "详情 DOM 未在 30 秒内准备好");
+}
+
+async function mountConfiguredLauncher(): Promise<void> {
+  const result = await sendRuntimeMessage<unknown>({ type: "GET_LAUNCHER_VISIBILITY" });
+  if (result.kind === "context_unavailable") return;
+  if (result.kind === "transport_error") {
+    reportUnexpectedError("读取入口设置失败", result.error);
+    return;
+  }
+  if (!isCommandResponse(result.value)) {
+    reportUnexpectedError("读取入口设置失败", "扩展后台返回无效响应");
+    return;
+  }
+  const visible = result.value.ok && result.value.data !== false;
+  if (visible && (isZhaopinListPage() || isZhaopinDetailPage())) mountLauncher();
+}
+
+void mountConfiguredLauncher().catch((error) => reportUnexpectedError("挂载入口失败", error));
+void reportLeasedDetail().catch((error) => reportUnexpectedError("读取智联招聘详情失败", error));

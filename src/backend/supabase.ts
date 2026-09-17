@@ -44,7 +44,7 @@ const factRowSchema = z.object({
 const opportunityRowSchema = z.object({
   id: z.string().uuid(),
   user_id: z.string().uuid(),
-  platform: z.literal("liepin"),
+  platform: z.enum(["liepin", "zhaopin"]),
   platform_job_id: z.string(),
   canonical_url: z.string(),
   title: z.string(),

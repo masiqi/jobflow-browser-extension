@@ -276,6 +276,29 @@ describe("side-panel scan interaction", () => {
       });
   });
 
+  it("keeps the Zhaopin first increment read-only even when automatic mode is configured", async () => {
+    const scanPreview = preview(2);
+    scanPreview.sourceUrl = "https://www.zhaopin.com/sou/";
+    scanPreview.candidates = scanPreview.candidates.map((candidate) => ({
+      ...candidate,
+      platform: "zhaopin" as const,
+      jobId: "CCL1501502560J4087703081" + candidate.index,
+      url: "https://www.zhaopin.com/jobdetail/CCL1501502560J4087703081" + candidate.index + ".htm",
+      canonicalUrl: "https://www.zhaopin.com/jobdetail/CCL1501502560J4087703081" + candidate.index + ".htm"
+    }));
+    scanPreview.processableJobIds = scanPreview.candidates.map((candidate) => candidate.jobId);
+    scanPreview.selectedJobIds = [...scanPreview.processableJobIds];
+    const state = appState(scanPreview);
+    state.settings.executionPolicy = "automatic_send";
+    const sendMessage = vi.fn(async () => ({ ok: true, data: state }));
+    await openSidePanel(sendMessage);
+
+    expect(document.querySelector(".status-band")?.textContent).toContain("智联招聘");
+    expect(document.querySelector(".status-band")?.textContent).toContain("不执行智联招聘真实投递");
+    expect(document.querySelector("#start")?.textContent).toContain("开始生成");
+    expect(document.querySelector("#start")?.textContent).not.toContain("一键投递");
+  });
+
   it("selects and clears only processable jobs with the master checkbox", async () => {
     const scanPreview = preview(3);
     scanPreview.processableJobIds = scanPreview.candidates.slice(0, 2).map((candidate) => candidate.jobId);

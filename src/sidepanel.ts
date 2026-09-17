@@ -15,7 +15,7 @@ import {
   LIEPIN_DETAIL_NAVIGATION_DELAY_MIN_SECONDS,
   LIEPIN_DETAIL_MIN_DWELL_SECONDS
 } from "./defaults";
-import type { AppState, BatchRun, DeliveryRecord, OpportunityRecord, ScanPreview } from "./types";
+import type { AppState, BatchRun, DeliveryRecord, OpportunityRecord, PlatformKey, ScanPreview } from "./types";
 
 type ScanFeedback = {
   kind: "idle" | "progress" | "success" | "error";
@@ -71,6 +71,39 @@ const POLICY_LABELS: Record<AppState["settings"]["executionPolicy"], { title: st
   }
 };
 
+function platformForState(preview: ScanPreview | null, run: BatchRun | null): PlatformKey | null {
+  if (run?.platform) return run.platform;
+  if (preview?.candidates[0]?.platform) return preview.candidates[0].platform;
+  if (preview?.sourceUrl) {
+    try {
+      const hostname = new URL(preview.sourceUrl).hostname.toLowerCase();
+      if (hostname === "www.zhaopin.com" || hostname === "zhaopin.com") return "zhaopin";
+      if (hostname === "c.liepin.com" || hostname.endsWith(".liepin.com")) return "liepin";
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function platformLabel(platform: PlatformKey | null): string {
+  return platform === "zhaopin" ? "智联招聘" : platform === "liepin" ? "猎聘" : "未选择平台";
+}
+
+function policyForPlatform(
+  executionPolicy: AppState["settings"]["executionPolicy"],
+  platform: PlatformKey | null
+): { title: string; note: string; button: string } {
+  if (platform === "zhaopin") {
+    return {
+      title: "仅生成",
+      note: "首期只读取职位详情并生成草稿，不执行智联招聘真实投递",
+      button: "开始生成"
+    };
+  }
+  return POLICY_LABELS[executionPolicy];
+}
+
 const appElement = document.querySelector<HTMLDivElement>("#app");
 if (!appElement) throw new Error("侧边栏根节点不存在");
 const app: HTMLDivElement = appElement;
@@ -104,8 +137,8 @@ function scanButton(disabled: boolean): HTMLButtonElement {
   button.id = "scan";
   button.type = "button";
   button.className = "primary scan-button";
-  button.title = "扫描当前猎聘页面";
-  button.setAttribute("aria-label", "扫描当前猎聘页面");
+  button.title = "扫描当前招聘网站页面";
+  button.setAttribute("aria-label", "扫描当前招聘网站页面");
   button.setAttribute("aria-busy", String(scanBusy));
   button.dataset.busy = String(scanBusy);
   button.disabled = disabled || scanBusy;
@@ -140,7 +173,7 @@ function resetSelectedJobs(preview: ScanPreview): void {
 }
 
 function previewMarkup(preview: ScanPreview | null, selectedJobs: Set<string>): string {
-  if (!preview) return '<p class="empty">扫描当前猎聘结果页后，可选择新职位生成草稿。</p>';
+  if (!preview) return '<p class="empty">扫描当前招聘网站结果页后，可选择新职位生成草稿。</p>';
   const processableJobIds = new Set(preview.processableJobIds);
   const selectedProcessableCount = [...processableJobIds].filter((jobId) => selectedJobs.has(jobId)).length;
   const allProcessableSelected = processableJobIds.size > 0 && selectedProcessableCount === processableJobIds.size;
@@ -261,15 +294,17 @@ async function render(stateOverride?: AppState): Promise<void> {
     }
   }
   const run = state.run;
+  const platform = platformForState(state.scanPreview, run);
   const selectedJobs = selectedJobsForState(state.scanPreview, run);
   const selectedCount = selectedProcessableCount(state.scanPreview, selectedJobs);
   const batchActive = run?.status === "running" || run?.status === "paused" || run?.status === "queued";
   const selectionReady = selectedCount > 0
     && !batchActive
     && !startBusy;
-  const policy = POLICY_LABELS[state.settings.executionPolicy];
+  const policy = policyForPlatform(state.settings.executionPolicy, platform);
   const delayRange = state.settings.automaticSendDelayMinSeconds + "-" + state.settings.automaticSendDelayMaxSeconds + " 秒";
-  const startLabel = state.settings.executionPolicy === "automatic_send" && !batchActive
+  const liveAutomatic = state.settings.executionPolicy === "automatic_send" && platform !== "zhaopin";
+  const startLabel = liveAutomatic && !batchActive
     ? policy.button + " " + selectedCount + " 个职位"
     : batchActive ? "批次进行中" : policy.button;
   app.innerHTML = [
@@ -281,15 +316,15 @@ async function render(stateOverride?: AppState): Promise<void> {
       + escapeHtml(state.settings.model.provider) + " / " + escapeHtml(state.settings.model.model)
       + '</small></div><div id="header-actions"></div></header>',
     '<section class="status-band policy-' + escapeHtml(state.settings.executionPolicy) + '"><span class="dot"></span><div><b>' + escapeHtml(policy.title)
-      + '</b><small>' + escapeHtml(policy.note)
-      + (state.settings.executionPolicy === "automatic_send" ? " · 随机间隔 " + escapeHtml(delayRange) : "")
+      + '</b><small>平台：' + escapeHtml(platformLabel(platform)) + " · " + escapeHtml(policy.note)
+      + (liveAutomatic ? " · 随机间隔 " + escapeHtml(delayRange) : "")
       + '</small></div></section>',
     '<section><div class="section-title"><h2>当前结果</h2><div id="scan-actions"></div></div>',
     '<div id="scanStatus" class="scan-status ' + escapeHtml(scanFeedback.kind)
       + '" role="status" aria-live="polite">' + escapeHtml(scanFeedback.message) + "</div>",
     previewMarkup(state.scanPreview, selectedJobs),
     '<div class="batch-row"><div class="batch-start"><small id="selectionSummary">已选 ', String(selectedCount), '</small><button id="start" class="primary '
-    + (state.settings.executionPolicy === "automatic_send" ? "automatic-action" : "") + '" type="button"',
+    + (liveAutomatic ? "automatic-action" : "") + '" type="button"',
     selectionReady ? "" : " disabled",
     ' aria-busy="' + String(startBusy) + '">',
     escapeHtml(startBusy ? "正在启动" : startLabel), "</button></div></div></section>",

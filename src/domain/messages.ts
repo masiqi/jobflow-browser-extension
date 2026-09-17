@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const platformSchema = z.literal("liepin");
+export const platformSchema = z.enum(["liepin", "zhaopin"]);
 export const executionPolicySchema = z.enum(["draft_only", "reviewed_send", "automatic_send"]);
 export const detailFailureCodeSchema = z.enum([
   "login_required",
@@ -98,7 +98,7 @@ const batchItemSchema = z.object({
 
 export const batchRunSchema = z.object({
   id: z.string().uuid(),
-  platform: z.literal("liepin"),
+  platform: platformSchema,
   status: z.enum(["queued", "running", "paused", "completed", "cancelled", "failed"]),
   sourceUrl: z.string().url(),
   executionPolicy: executionPolicySchema,

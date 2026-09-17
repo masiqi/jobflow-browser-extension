@@ -259,10 +259,12 @@ async function dispatchDetail(job: DetailJob): Promise<{ ok: boolean; error?: st
 }
 
 async function dispatchDetailWithLease(job: DetailJob, targetLeaseId: string): Promise<{ ok: boolean; error?: string }> {
+  const storedRun = batchRunSchema.safeParse(localData[STORAGE_KEYS.run]);
+  const tabId = storedRun.success ? storedRun.data.items[storedRun.data.currentIndex]?.tabId ?? 101 : 101;
   return new Promise((resolve) => {
     runtimeListener?.(
       { type: "DETAIL_READY", leaseId: targetLeaseId, job },
-      {} as chrome.runtime.MessageSender,
+      liepinContentSender({ tab: { id: tabId } as chrome.tabs.Tab }),
       (response) => resolve(response as { ok: boolean; error?: string })
     );
   });

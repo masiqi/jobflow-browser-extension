@@ -71,7 +71,7 @@ const POLICY_LABELS: Record<ExtensionSettings["executionPolicy"], string> = {
 };
 
 const POLICY_STATUS: Record<ExtensionSettings["executionPolicy"], { title: string; note: string }> = {
-  draft_only: { title: "仅生成草稿", note: "当前禁止猎聘真实写入" },
+  draft_only: { title: "仅生成草稿", note: "当前禁止招聘网站真实写入" },
   reviewed_send: { title: "逐条确认发送", note: "仅管理台可执行真实写入" },
   automatic_send: { title: "选中批次自动投递", note: "仅侧边栏一键按钮授权本批" }
 };
@@ -141,7 +141,7 @@ function accountView(state: AppState): string {
     '<dt>邮箱认证</dt><dd>' + escapeHtml(state.auth.emailVerificationStatus) + '</dd>',
     '<dt>模型权益</dt><dd>' + (state.auth.vip ? "VIP 托管模型" : "BYOK") + '</dd></dl>',
     '<label class="check"><input id="launcherVisible" type="checkbox" ' + (state.settings.launcherVisible ? "checked" : "")
-      + '><span>在猎聘页面显示侧边栏入口</span></label>',
+      + '><span>在支持的招聘网站页面显示侧边栏入口</span></label>',
     '<fieldset class="segmented execution-policy"><legend>执行策略</legend>',
     (Object.entries(POLICY_LABELS) as Array<[ExtensionSettings["executionPolicy"], string]>).map(([value, label]) =>
       '<label><input type="radio" name="executionPolicy" value="' + value + '" '
@@ -312,7 +312,7 @@ function recordRow(record: OpportunityRecord, selected: boolean, delivery?: Deli
   return '<button type="button" class="record-row ' + (selected ? "selected" : "") + '" data-record-id="'
     + escapeHtml(record.id) + '"><span class="status-dot ' + escapeHtml(delivery?.overallStatus ?? record.status)
     + '"></span><span><b>' + escapeHtml(record.title) + '</b><small>' + escapeHtml(record.company)
-    + " · " + escapeHtml(recordStatusLabel(record, delivery)) + '</small></span><time>'
+    + " · " + escapeHtml(record.platform === "zhaopin" ? "智联招聘" : "猎聘") + " · " + escapeHtml(recordStatusLabel(record, delivery)) + '</small></span><time>'
     + escapeHtml(formatTime(record.lastSeenAt)) + "</time></button>";
 }
 
@@ -333,7 +333,8 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
     .filter((revision) => revision.text === draft.currentText)
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
   const retryableDeliveryStatuses = new Set(["ready", "awaiting_confirmation", "partial", "failed", "review_required"]);
-  const canPrepareReviewedSend = state.settings.executionPolicy !== "draft_only"
+  const canPrepareReviewedSend = record.platform === "liepin"
+    && state.settings.executionPolicy !== "draft_only"
     && record.status === "draft_ready"
     && Boolean(draft && latestRevision)
     && (!delivery || retryableDeliveryStatuses.has(delivery.overallStatus));
@@ -342,7 +343,8 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
   const reviewedBusy = reviewedSendBusyOpportunityId === record.id;
   const reviewedPrepared = reviewedSendPreparedOpportunityId === record.id;
   const reviewedFeedback = reviewedSendFeedback.opportunityId === record.id ? reviewedSendFeedback : null;
-  const draftOnlyLiveBlocked = state.settings.executionPolicy === "draft_only"
+  const draftOnlyLiveBlocked = record.platform === "liepin"
+    && state.settings.executionPolicy === "draft_only"
     && record.status === "draft_ready"
     && Boolean(draft);
   return [
@@ -389,7 +391,9 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
         '<div class="revision"><b>' + (revision.kind === "generated" ? "模型生成" : "用户编辑")
         + '</b><time>' + escapeHtml(formatTime(revision.createdAt)) + '</time><p>' + escapeHtml(revision.text) + "</p></div>"
       ).join("") + "</details></div>" : "",
-    delivery || canPrepareReviewedSend || reviewedFeedback || draftOnlyLiveBlocked
+    record.platform === "zhaopin"
+      ? '<div class="detail-section readonly-platform"><h4>智联招聘首期策略</h4><p>当前只保存职位详情并生成草稿，暂不执行智联招聘真实投递。</p></div>'
+      : delivery || canPrepareReviewedSend || reviewedFeedback || draftOnlyLiveBlocked
       ? '<div class="detail-section reviewed-send" aria-busy="' + String(reviewedBusy) + '"><h4>人工确认投递并打招呼</h4>'
         + '<dl class="delivery-details"><dt>简历</dt><dd>使用猎聘当前默认简历</dd><dt>投递</dt><dd>'
         + escapeHtml(DELIVERY_COMPONENT_LABELS[delivery?.applicationStatus ?? "pending"] ?? "未知") + '</dd><dt>招呼</dt><dd>'
@@ -449,7 +453,7 @@ async function render(): Promise<void> {
   }
   const policyStatus = POLICY_STATUS[state.settings.executionPolicy];
   app.innerHTML = [
-    '<aside><div class="brand"><span>JF</span><div><b>JobFlow</b><small>猎聘草稿助手</small></div></div>',
+    '<aside><div class="brand"><span>JF</span><div><b>JobFlow</b><small>求职草稿助手</small></div></div>',
     '<nav>', navMarkup(), '</nav><div class="mode"><span></span><div><b>' + escapeHtml(policyStatus.title)
       + '</b><small>' + escapeHtml(policyStatus.note) + '</small></div></div></aside>',
     '<main><header><div><b>' + escapeHtml(state.auth.email || "未登录") + '</b><small>'

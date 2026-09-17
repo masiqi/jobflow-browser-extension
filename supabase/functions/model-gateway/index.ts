@@ -59,7 +59,7 @@ const profileSchema = z.object({
 }).strict();
 
 const jobSchema = z.object({
-  platform: z.literal("liepin"),
+  platform: z.enum(["liepin", "zhaopin"]),
   jobId: z.string().min(1).max(128),
   url: z.string().url(),
   canonicalUrl: z.string().url(),
@@ -477,7 +477,7 @@ async function hydrateTrustedOpportunityPayload(
     throw new Error("gateway:owned_input_not_found");
   }
   const opportunity = parseOrGateway(z.object({
-    platform: z.literal("liepin"),
+    platform: z.enum(["liepin", "zhaopin"]),
     platform_job_id: z.string()
   }), opportunityResult.data, "trusted_data_invalid");
   if (opportunity.platform !== payload.job.platform || opportunity.platform_job_id !== payload.job.jobId) {

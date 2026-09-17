@@ -58,6 +58,11 @@ import {
   parseSuitabilityDecision
 } from "./prompt";
 import { createDraftResumeProfile, sourceHash } from "./resume";
+import { isLiepinListPage } from "./platforms/liepin";
+import {
+  isZhaopinListPage,
+  zhaopinJobIdFromUrl
+} from "./platforms/zhaopin";
 import {
   clearByokKey,
   clearDeviceOwner,
@@ -259,14 +264,27 @@ async function scanCurrentTab(): Promise<ScanPreview> {
   const auth = await getAuthProjection();
   if (auth.status !== "signed_in") throw new Error("请先登录");
   const tab = (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
-  if (typeof tab?.id !== "number" || !tab.url?.includes(".liepin.com/")) {
-    throw new Error("请在猎聘职位列表页扫描");
+  let platform: ListCandidate["platform"] | null = null;
+  if (typeof tab?.id === "number" && tab.url) {
+    try {
+      const location = new URL(tab.url) as unknown as Location;
+      if (isLiepinListPage(location)) platform = "liepin";
+      else if (isZhaopinListPage(location)) platform = "zhaopin";
+    } catch {
+      platform = null;
+    }
+  }
+  if (typeof tab?.id !== "number" || !platform) {
+    throw new Error("请在猎聘或智联招聘职位列表页扫描");
   }
   const raw: unknown = await chrome.tabs.sendMessage(tab.id, { type: "CONTENT_SCAN" });
   const result = z.object({
     sourceUrl: z.string().url(),
     candidates: z.array(listCandidateSchema).max(500)
   }).strict().parse(raw);
+  if (result.candidates.some((candidate) => candidate.platform !== platform)) {
+    throw new Error("职位列表来源与当前招聘平台不匹配");
+  }
   const existing = await listOpportunities();
   const existingByKey = new Map(existing.map((item) => [item.platform + ":" + item.platformJobId, item]));
   const stored = await upsertCandidates(result.candidates);
@@ -328,9 +346,33 @@ function jobIdFromTrustedLiepinPageUrl(value: string): string {
   }
 }
 
+function jobIdFromTrustedZhaopinPageUrl(value: string): string {
+  const direct = zhaopinJobIdFromUrl(value);
+  if (direct) return direct;
+  try {
+    const url = new URL(value);
+    const backUrl = url.searchParams.get("backurl");
+    return backUrl ? zhaopinJobIdFromUrl(backUrl) : "";
+  } catch {
+    return "";
+  }
+}
+
 function isTrustedLiepinContentSender(sender: chrome.runtime.MessageSender, jobId: string): boolean {
   if (sender.id !== chrome.runtime.id || typeof sender.tab?.id !== "number" || !sender.url) return false;
   return jobIdFromTrustedLiepinPageUrl(sender.url) === jobId;
+}
+
+function isTrustedPlatformContentSender(
+  sender: chrome.runtime.MessageSender,
+  platform: ListCandidate["platform"],
+  jobId: string
+): boolean {
+  if (sender.id !== chrome.runtime.id || typeof sender.tab?.id !== "number" || !sender.url) return false;
+  const actualJobId = platform === "liepin"
+    ? jobIdFromTrustedLiepinPageUrl(sender.url)
+    : jobIdFromTrustedZhaopinPageUrl(sender.url);
+  return actualJobId === jobId;
 }
 
 async function startBatch(
@@ -446,6 +488,7 @@ async function closeItemTab(item: BatchItem): Promise<void> {
 }
 
 async function waitForMinimumDetailDwell(item: BatchItem): Promise<void> {
+  if (item.candidate.platform !== "liepin") return;
   if (typeof item.tabId !== "number" || !item.startedAt) return;
   const startedAt = new Date(item.startedAt).getTime();
   if (!Number.isFinite(startedAt)) return;
@@ -471,10 +514,11 @@ function clearItemBlocker(item: BatchItem): void {
 }
 
 async function openCurrentItemTab(run: BatchRun, item: BatchItem): Promise<boolean> {
+  item.status = "opening";
   item.startedAt = now();
   item.attempt += 1;
   item.leaseId = crypto.randomUUID();
-  const url = new URL(item.candidate.url);
+  const url = new URL(item.candidate.canonicalUrl);
   url.hash = "jobflow-lease=" + item.leaseId;
   const tab = await chrome.tabs.create({ url: url.toString(), active: false });
   if (typeof tab.id !== "number") {
@@ -633,7 +677,9 @@ async function processNext(): Promise<void> {
   }
   const item = run.items[run.currentIndex];
   if (!item) return;
-  if (item.status === "delivery_ready" || item.status === "waiting_interval") {
+  if (run.executionPolicy === "automatic_send"
+    && run.platform === "liepin"
+    && (item.status === "delivery_ready" || item.status === "waiting_interval")) {
     return processAutomaticDelivery(run, item);
   }
   if (item.status !== "queued" && item.status !== "waiting_navigation") return;
@@ -656,14 +702,14 @@ async function processNext(): Promise<void> {
         : "excluded";
     return finishItem(run, item, status, "已存在持久处理记录");
   }
-  if (!(await waitForLiepinNavigationSlot(run, item))) return;
+  if (run.platform === "liepin" && !(await waitForLiepinNavigationSlot(run, item))) return;
   if (!(await openCurrentItemTab(run, item))) return;
   if (!item.leaseId) return finishItem(run, item, "failed", "详情标签页租约不可用");
   await saveOpeningRunAndDetailAlarm(run, item);
 }
 
 async function processAutomaticDelivery(run: BatchRun, item: BatchItem): Promise<void> {
-  if (run.executionPolicy !== "automatic_send") return;
+  if (run.executionPolicy !== "automatic_send" || run.platform !== "liepin") return;
   const auth = await getAuthProjection();
   if (auth.status !== "signed_in" || !auth.userId) {
     await pauseAutomaticRunBeforeWrite(run, "signed_out", "请先登录 JobFlow");
@@ -856,6 +902,7 @@ async function handleDetail(job: DetailJob, leaseId: string): Promise<void> {
 
   try {
     if (run.executionPolicy === "automatic_send"
+      && run.platform === "liepin"
       && item.opportunityId
       && item.draftRevisionId
       && item.draftSha256) {
@@ -892,7 +939,7 @@ async function handleDetail(job: DetailJob, leaseId: string): Promise<void> {
     }
     item.filter = result.filter;
     item.suitability = result.suitability;
-    if (run.executionPolicy === "automatic_send" && result.status === "draft_ready") {
+    if (run.executionPolicy === "automatic_send" && run.platform === "liepin" && result.status === "draft_ready") {
       const draftIdentity = await loadCurrentDraftIdentity(opportunity.id);
       item.status = "delivery_ready";
       item.opportunityId = opportunity.id;
@@ -914,13 +961,13 @@ async function handleDetailPageReady(
   sender: chrome.runtime.MessageSender,
   jobId: string
 ): Promise<string | null> {
-  if (!isTrustedLiepinContentSender(sender, jobId)) return null;
   const run = await getRun();
   if (!run || (run.status !== "running" && run.status !== "paused")) return null;
   const item = run.items[run.currentIndex];
   if (!item || (item.status !== "opening" && item.status !== "extracting")) return null;
   if (item.candidate.jobId !== jobId) return null;
   if (item.tabId !== sender.tab?.id) return null;
+  if (!isTrustedPlatformContentSender(sender, item.candidate.platform, jobId)) return null;
   return item.leaseId ?? null;
 }
 
@@ -1840,9 +1887,19 @@ async function handleRequest(
       return undefined;
     case "DETAIL_PAGE_READY":
       return handleDetailPageReady(sender, request.jobId);
-    case "DETAIL_READY":
-      await handleDetail(request.job, request.leaseId);
+    case "DETAIL_READY": {
+      const run = await getRun();
+      const item = run?.items[run.currentIndex];
+      if (run
+        && item?.leaseId === request.leaseId
+        && item.candidate.jobId === request.job.jobId
+        && item.tabId === sender.tab?.id
+        && request.job.platform === item.candidate.platform
+        && isTrustedPlatformContentSender(sender, item.candidate.platform, request.job.jobId)) {
+        await handleDetail(request.job, request.leaseId);
+      }
       return undefined;
+    }
     case "DETAIL_FAILED": {
       const run = await getRun();
       const item = run?.items[run.currentIndex];
@@ -1850,7 +1907,7 @@ async function handleRequest(
         && item?.leaseId === request.leaseId
         && item.candidate.jobId === request.jobId
         && item.tabId === sender.tab?.id
-        && isTrustedLiepinContentSender(sender, request.jobId)) {
+        && isTrustedPlatformContentSender(sender, item.candidate.platform, request.jobId)) {
         await handleDetailFailure(run, item, request.error, request.code);
       }
       return undefined;
@@ -1947,7 +2004,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 async function recoverRun(): Promise<void> {
   const run = await getRun();
   if (!run) return;
-  if (run.executionPolicy === "automatic_send") {
+  if (run.executionPolicy === "automatic_send" && run.platform === "liepin") {
     const item = run.items[run.currentIndex];
     if (["running", "paused", "cancelled"].includes(run.status) && item?.status === "delivery_in_progress") {
       const leaseId = item.leaseId;

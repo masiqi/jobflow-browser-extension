@@ -5,11 +5,32 @@ import {
   decodeRuntimeRequest,
   executionPolicySchema,
   extensionSettingsSchema,
-  liepinReviewedSendExecuteCommandSchema
+  liepinReviewedSendExecuteCommandSchema,
+  listCandidateSchema,
+  platformSchema
 } from "../src/domain/messages";
 import { normalizeChatCompletionsEndpoint } from "../src/llm";
 
 describe("runtime and endpoint contracts", () => {
+  it("accepts both supported platform identities while keeping the shared candidate shape strict", () => {
+    expect(platformSchema.parse("liepin")).toBe("liepin");
+    expect(platformSchema.parse("zhaopin")).toBe("zhaopin");
+    expect(listCandidateSchema.parse({
+      platform: "zhaopin",
+      jobId: "CCLsyntheticJ001",
+      url: "https://www.zhaopin.com/jobdetail/CCLsyntheticJ001.htm",
+      canonicalUrl: "https://www.zhaopin.com/jobdetail/CCLsyntheticJ001.htm",
+      title: "Synthetic role",
+      company: "Synthetic company",
+      location: "北京",
+      salary: "20-30K",
+      experience: "3-5年",
+      education: "本科",
+      cardText: "Synthetic card",
+      index: 0
+    }).platform).toBe("zhaopin");
+  });
+
   it("clears the detail-readiness alarm before filtering or model work", async () => {
     const source = await readFile("src/background.ts", "utf8");
     const handler = source.slice(

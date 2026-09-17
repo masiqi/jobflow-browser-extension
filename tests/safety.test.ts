@@ -8,6 +8,7 @@ const readSource = (name: string) => readFile(resolve(name), "utf8");
 describe("MV3 safety gate", () => {
   it("builds the approved side-panel surfaces with exact permissions", async () => {
     const files = await readdir(resolve("dist"));
+    const contentFiles = await readdir(resolve("dist/content"));
     expect(files).toEqual(expect.arrayContaining([
       "manifest.json",
       "background.js",
@@ -16,18 +17,20 @@ describe("MV3 safety gate", () => {
       "sidepanel.html",
       "sidepanel.js"
     ]));
+    expect(contentFiles).toEqual(expect.arrayContaining(["liepin.js", "zhaopin.js"]));
     const manifest = JSON.parse(await readDist("manifest.json"));
     expect(manifest.manifest_version).toBe(3);
     expect(manifest.permissions).toEqual(["storage", "tabs", "alarms", "sidePanel"]);
     expect(manifest.permissions).not.toContain("cookies");
     expect(manifest.host_permissions[0]).toBe("https://*.liepin.com/*");
-    for (const permission of manifest.host_permissions.slice(1)) {
+    expect(manifest.host_permissions[1]).toBe("https://www.zhaopin.com/*");
+    for (const permission of manifest.host_permissions.slice(2)) {
       expect(
         permission === "http://127.0.0.1:54321/*"
           || /^https:\/\/[a-z0-9-]+\.supabase\.co\/\*$/i.test(permission)
       ).toBe(true);
     }
-    expect(manifest.host_permissions.length).toBeLessThanOrEqual(2);
+    expect(manifest.host_permissions.length).toBeLessThanOrEqual(3);
     expect(manifest.host_permissions).not.toContain("http://*/*");
     expect(manifest.host_permissions).not.toContain("https://*/*");
     expect(manifest.side_panel.default_path).toBe("sidepanel.html");
@@ -35,6 +38,7 @@ describe("MV3 safety gate", () => {
 
   it("contains no private Liepin API, scrolling, form, or cookie implementation", async () => {
     const content = await readDist("content/liepin.js");
+    const zhaopinContent = await readDist("content/zhaopin.js");
     const background = await readDist("background.js");
     const adapter = await readSource("src/platforms/liepin.ts");
     const backgroundSource = await readSource("src/background.ts");
@@ -49,6 +53,7 @@ describe("MV3 safety gate", () => {
       "GeekChatCore"
     ]) {
       expect(content).not.toContain(forbidden);
+      expect(zhaopinContent).not.toContain(forbidden);
     }
     expect(adapter).toContain("executeLiepinReviewedSend");
     expect(adapter).toContain('data-selector="chat-chat"');
@@ -65,6 +70,9 @@ describe("MV3 safety gate", () => {
     }
     expect(content).toContain("打开 JobFlow 侧边栏");
     expect(content).not.toContain("chrome.storage");
+    expect(zhaopinContent).not.toContain("chrome.storage");
+    expect(zhaopinContent).not.toContain("CONTENT_REVIEWED_SEND_EXECUTE");
+    expect(zhaopinContent).not.toContain("CONTENT_REVIEWED_SEND_PREFLIGHT");
     expect(background).toContain("TRUSTED_CONTEXTS");
     expect(background).not.toContain("liveUnlocked");
     expect(backgroundSource).toContain("isTrustedOptionsSender");
