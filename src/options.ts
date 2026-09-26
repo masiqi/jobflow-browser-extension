@@ -1,5 +1,6 @@
 import { MODEL_PROVIDER_PRESETS, TECHNOLOGY_CATALOG } from "./defaults";
 import { projectRuleEvidence } from "./domain/events";
+import { reviewAndSendProgressSchema } from "./domain/messages";
 import { readPastedResume, readResumeFile } from "./pdf";
 import { sourceHash } from "./resume";
 import { deleteResume, storeResumeFile, storeResumeText } from "./local/resume-store";
@@ -49,6 +50,14 @@ let storedRetryFeedback: StoredRetryFeedback = { opportunityId: "", kind: "idle"
 let reviewedSendBusyOpportunityId = "";
 let reviewedSendPreparedOpportunityId = "";
 let reviewedSendFeedback: ReviewedSendFeedback = { opportunityId: "", kind: "idle", message: "" };
+let reviewAndSendBusy = false;
+let reviewAndSendOwnerId = "";
+let reviewAndSendFeedback: ReviewedSendFeedback = { opportunityId: "", kind: "idle", message: "" };
+const REVIEW_AND_SEND_STAGES = {
+  generating: "正在生成招呼语",
+  preflighting: "正在检查投递条件",
+  sending: "正在投递并发送"
+};
 
 const STATUS_LABELS: Record<string, string> = {
   discovered: "待处理",
@@ -317,6 +326,12 @@ function recordRow(record: OpportunityRecord, selected: boolean, delivery?: Deli
 }
 
 function recordDetail(state: AppState, record: OpportunityRecord): string {
+  const oneClickFeedback = reviewAndSendOwnerId === state.auth.userId
+    && reviewAndSendFeedback.opportunityId === record.id ? reviewAndSendFeedback : null;
+  const oneClickBusy = reviewAndSendBusy && Boolean(oneClickFeedback);
+  const canReviewAndSend = record.status === "review_required" && record.platform === "liepin"
+    && state.settings.executionPolicy !== "draft_only"
+    && !state.deliveries.some((item) => item.opportunityId === record.id);
   const evaluation = state.evaluations.find((item) => item.opportunityId === record.id);
   const evaluationProfile = evaluation
     ? state.resumeProfiles.find((profile) => profile.id === evaluation.profileId)
@@ -334,6 +349,7 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
   const retryableDeliveryStatuses = new Set(["ready", "awaiting_confirmation", "partial", "failed", "review_required"]);
   const canPrepareReviewedSend = record.platform === "liepin"
+    && !oneClickBusy
     && state.settings.executionPolicy !== "draft_only"
     && record.status === "draft_ready"
     && Boolean(draft && latestRevision)
@@ -417,9 +433,21 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
         + '</div><p id="reviewedSendStatus" class="reviewed-send-status ' + escapeHtml(reviewedFeedback?.kind ?? "idle")
         + '" role="status" aria-live="polite" aria-atomic="true">' + escapeHtml(reviewedFeedback?.message ?? "") + "</p></div>"
       : "",
+    canReviewAndSend || oneClickFeedback
+      ? '<div class="detail-section review-and-send" aria-busy="' + String(oneClickBusy) + '">'
+        + (canReviewAndSend || oneClickBusy
+          ? '<p>点击即确认此职位适合投递：生成招呼语、检查页面后，使用猎聘当前默认简历真实投递并发送，无需再次确认。</p>'
+            + '<button class="primary" data-action="review-and-send" data-id="' + escapeHtml(record.id)
+            + '" aria-busy="' + String(oneClickBusy) + '" ' + (reviewAndSendBusy ? "disabled" : "") + '>'
+            + escapeHtml(oneClickBusy ? oneClickFeedback?.message : "生成并投递") + '</button>'
+          : "")
+        + '<p id="reviewAndSendStatus" role="status" aria-live="polite" aria-atomic="true" class="reviewed-send-status '
+        + escapeHtml(oneClickFeedback?.kind ?? "idle") + '">' + escapeHtml(oneClickFeedback?.message ?? "") + '</p></div>'
+      : "",
     record.status === "review_required"
-      ? '<div class="actions"><button class="primary" data-action="review-continue" data-id="' + escapeHtml(record.id)
-        + '">继续生成</button><button data-action="review-exclude" data-id="' + escapeHtml(record.id)
+      ? '<div class="actions">' + (!canReviewAndSend
+        ? '<button class="primary" data-action="review-continue" data-id="' + escapeHtml(record.id) + '">继续生成</button>' : "")
+        + '<button data-action="review-exclude" data-id="' + escapeHtml(record.id)
         + '">永久排除</button></div>' : "",
     canOverride
       ? '<div class="actions"><button class="primary" data-action="override" data-id="' + escapeHtml(record.id)
@@ -604,11 +632,18 @@ function bindActions(state: AppState): void {
   for (const input of factApprovals) input.addEventListener("change", syncFactApprovalMaster);
   syncFactApprovalMaster();
   document.querySelectorAll<HTMLElement>("[data-action]").forEach((button) => {
+    if (reviewAndSendBusy && button.dataset.id === reviewAndSendFeedback.opportunityId
+      && button instanceof HTMLButtonElement) button.disabled = true;
     button.addEventListener("click", () => void handleAction(button.dataset.action || "", button, state));
   });
 }
 
 async function handleAction(action: string, target: HTMLElement, state: AppState): Promise<void> {
+  if (reviewAndSendBusy && target.dataset.id === reviewAndSendFeedback.opportunityId) return;
+  if (action === "review-and-send") {
+    await runReviewAndSend(target.dataset.id || "", state);
+    return;
+  }
   if (action === "import-resume") {
     await runResumeImport(state);
     return;
@@ -697,6 +732,50 @@ async function handleAction(action: string, target: HTMLElement, state: AppState
     target.setAttribute("aria-busy", "false");
     target.disabled = originallyDisabled;
     target.textContent = originalLabel;
+  }
+}
+
+function updateReviewAndSendProgress(message: string): void {
+  reviewAndSendFeedback.message = message;
+  const button = document.querySelector<HTMLButtonElement>('[data-action="review-and-send"]');
+  if (button?.dataset.id === reviewAndSendFeedback.opportunityId) {
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    button.textContent = message;
+    document.querySelector(".review-and-send")?.setAttribute("aria-busy", "true");
+    const status = document.querySelector("#reviewAndSendStatus");
+    if (status) status.textContent = message;
+  }
+  document.querySelectorAll<HTMLButtonElement>('[data-action][data-id]').forEach((control) => {
+    if (control.dataset.id === reviewAndSendFeedback.opportunityId) control.disabled = true;
+  });
+}
+
+async function runReviewAndSend(opportunityId: string, state: AppState): Promise<void> {
+  if (!opportunityId || reviewAndSendBusy || reviewedSendBusyOpportunityId) return;
+  reviewAndSendBusy = true;
+  selectedOpportunityId = opportunityId;
+  reviewAndSendOwnerId = state.auth.userId || "";
+  reviewAndSendFeedback = { opportunityId, kind: "progress", message: REVIEW_AND_SEND_STAGES.generating };
+  updateReviewAndSendProgress(REVIEW_AND_SEND_STAGES.generating);
+  try {
+    const result = await sendCommand<DeliveryRecord>({ type: "REVIEW_AND_SEND", opportunityId });
+    reviewAndSendFeedback = {
+      opportunityId,
+      kind: result.overallStatus === "succeeded" ? "success" : "error",
+      message: result.overallStatus === "succeeded" ? "已完成投递并发送招呼语"
+        : deliveryDisplayReason(result) || "发送结果需要复核，请查看投递记录；不会自动重复发送"
+    };
+  } catch (error) {
+    reviewAndSendFeedback = {
+      opportunityId,
+      kind: "error",
+      message: error instanceof Error ? error.message : String(error)
+    };
+  } finally {
+    reviewAndSendBusy = false;
+    reviewedSendPreparedOpportunityId = "";
+    await render();
   }
 }
 
@@ -882,5 +961,18 @@ function showToast(message: string, error = false): void {
     toast.className = "";
   }, 3500);
 }
+
+chrome.runtime.onMessage?.addListener((message: unknown, sender) => {
+  if (sender.id !== chrome.runtime.id || sender.tab) return;
+  const parsed = reviewAndSendProgressSchema.safeParse(message);
+  if (parsed.success && reviewAndSendBusy
+    && parsed.data.opportunityId === reviewAndSendFeedback.opportunityId
+    && parsed.data.ownerId === reviewAndSendOwnerId) {
+    updateReviewAndSendProgress(REVIEW_AND_SEND_STAGES[parsed.data.stage]);
+  } else if (reviewAndSendBusy && message && typeof message === "object"
+    && "type" in message && message.type === "RUN_UPDATED") {
+    void render();
+  }
+});
 
 void render();

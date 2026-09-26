@@ -413,6 +413,7 @@ describe("resume profile interactions", () => {
 
   it("shows immediate progress and blocks duplicate review generation", async () => {
     const state = appState(profile());
+    state.settings.executionPolicy = "draft_only";
     const opportunityId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
     state.opportunities = [{
       id: opportunityId,
@@ -458,6 +459,96 @@ describe("resume profile interactions", () => {
     releaseGeneration();
     await vi.waitFor(() => expect(document.querySelector('[data-action="review-continue"]')?.textContent).toBe("继续生成"));
     expect(document.querySelector("#toast")?.textContent).toContain("已转入人工确认");
+  });
+
+  function pendingReviewState(): AppState {
+    const state = appState(profile());
+    state.opportunities = [{
+      id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      userId: state.auth.userId!, platform: "liepin", platformJobId: "1980000310",
+      canonicalUrl: "https://www.liepin.com/a/1980000310.shtml",
+      title: "合成复核职位", company: "合成科技", location: "北京", salary: "30-50k",
+      experience: "3-5年", education: "本科", cardText: "合成职位卡片",
+      description: "岗位职责：负责合成智能体平台研发。", status: "review_required",
+      firstSeenAt: "2026-09-11T00:00:00.000Z", lastSeenAt: "2026-09-11T00:00:01.000Z"
+    }];
+    return state;
+  }
+
+  it("shows one-click stages and keeps controls busy across state refreshes and pending-review filtering", async () => {
+    const state = pendingReviewState();
+    const opportunityId = state.opportunities[0]!.id;
+    let listener!: (message: unknown, sender: chrome.runtime.MessageSender) => void;
+    let finish!: (response: unknown) => void;
+    const pending = new Promise((resolve) => { finish = resolve; });
+    const sendMessage = vi.fn(async (request: { type: string }) => {
+      if (request.type === "GET_APP_STATE") return { ok: true, data: state };
+      if (request.type === "REVIEW_AND_SEND") return pending;
+      throw new Error("Unexpected command");
+    });
+    const confirm = vi.fn();
+    vi.stubGlobal("confirm", confirm);
+    vi.stubGlobal("chrome", { runtime: {
+      id: "extension-id", sendMessage,
+      onMessage: { addListener: vi.fn((callback) => { listener = callback; }) }
+    }, tabs: { create: vi.fn() } });
+    await import("../src/options");
+    await vi.waitFor(() => expect(document.querySelector('[data-action="review-and-send"]')).not.toBeNull());
+    const filter = document.querySelector<HTMLSelectElement>("#recordFilter")!;
+    filter.value = "review_required";
+    filter.dispatchEvent(new Event("change"));
+    await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#recordFilter")?.value).toBe("review_required"));
+    const button = document.querySelector<HTMLButtonElement>('[data-action="review-and-send"]')!;
+    expect(button.textContent).toBe("生成并投递");
+    expect(document.querySelector('[data-action="review-continue"]')).toBeNull();
+    expect(document.querySelector(".review-and-send")?.textContent).toContain("真实投递并发送");
+    button.click();
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("aria-busy")).toBe("true");
+    expect(button.textContent).toBe("正在生成招呼语");
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(sendMessage.mock.calls.filter(([request]) => request.type === "REVIEW_AND_SEND")).toHaveLength(1);
+    expect(document.querySelector<HTMLButtonElement>('[data-action="review-exclude"]')?.disabled).toBe(true);
+
+    state.opportunities[0]!.status = "draft_ready";
+    listener({ type: "REVIEW_AND_SEND_PROGRESS", opportunityId, ownerId: state.auth.userId, stage: "preflighting" }, { id: "extension-id" });
+    listener({ type: "RUN_UPDATED" }, { id: "extension-id" });
+    await vi.waitFor(() => expect(document.querySelector('[data-action="review-and-send"]')?.textContent).toBe("正在检查投递条件"));
+    expect(document.querySelector<HTMLButtonElement>('[data-action="review-and-send"]')?.disabled).toBe(true);
+    expect(document.querySelector(".record-detail")?.textContent).toContain("合成复核职位");
+    expect(document.querySelector('[data-action="prepare-reviewed-send"]')).toBeNull();
+    listener({ type: "REVIEW_AND_SEND_PROGRESS", opportunityId, ownerId: state.auth.userId, stage: "sending" }, { id: "extension-id" });
+    expect(document.querySelector("#reviewAndSendStatus")?.textContent).toBe("正在投递并发送");
+    finish({ ok: true, data: { overallStatus: "succeeded" } });
+    await vi.waitFor(() => expect(document.querySelector("#reviewAndSendStatus")?.textContent).toBe("已完成投递并发送招呼语"));
+    expect(document.querySelector(".review-and-send")?.getAttribute("aria-busy")).toBe("false");
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("keeps one-click failure visible and restores the button for a safe retry", async () => {
+    const state = pendingReviewState();
+    const sendMessage = vi.fn(async (request: { type: string }) => request.type === "GET_APP_STATE"
+      ? { ok: true, data: state } : { ok: false, error: "模型请求失败，请检查配置" });
+    vi.stubGlobal("chrome", { runtime: { sendMessage }, tabs: { create: vi.fn() } });
+    await import("../src/options");
+    await vi.waitFor(() => expect(document.querySelector('[data-action="review-and-send"]')).not.toBeNull());
+    document.querySelector<HTMLButtonElement>('[data-action="review-and-send"]')!.click();
+    await vi.waitFor(() => expect(document.querySelector("#reviewAndSendStatus")?.textContent).toBe("模型请求失败，请检查配置"));
+    expect(document.querySelector<HTMLButtonElement>('[data-action="review-and-send"]')?.disabled).toBe(false);
+    expect(document.querySelector<HTMLButtonElement>('[data-action="review-exclude"]')?.disabled).toBe(false);
+    expect(document.querySelector("#reviewAndSendStatus")?.getAttribute("aria-live")).toBe("polite");
+  });
+
+  it.each(["zhaopin", "draft_only"])("keeps %s reviews generation-only", async (mode) => {
+    const state = pendingReviewState();
+    if (mode === "zhaopin") state.opportunities[0]!.platform = "zhaopin";
+    else state.settings.executionPolicy = "draft_only";
+    const sendMessage = vi.fn(async () => ({ ok: true, data: state }));
+    vi.stubGlobal("chrome", { runtime: { sendMessage }, tabs: { create: vi.fn() } });
+    await import("../src/options");
+    await vi.waitFor(() => expect(document.querySelector('[data-action="review-continue"]')).not.toBeNull());
+    expect(document.querySelector('[data-action="review-and-send"]')).toBeNull();
+    expect(document.querySelector('[data-action="review-exclude"]')).not.toBeNull();
   });
 
   it("requires prepare before a reviewed live send confirmation and blocks duplicates", async () => {

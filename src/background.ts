@@ -126,6 +126,7 @@ interface ReviewedSendLease {
 
 const reviewedSendLeases = new Map<string, ReviewedSendLease>();
 const reviewedSendExecuting = new Set<string>();
+const reviewAndSendInFlight = new Set<string>();
 const userGenerationInFlight = new Set<string>();
 let liepinLiveWriteLockOwner: string | null = null;
 
@@ -1569,6 +1570,7 @@ async function executeReviewedDeliveryCore(input: DeliveryCoreInput): Promise<De
       draftRevisionId,
       draftSha256
     });
+    await beforeWrite?.();
     await markReviewedDeliveryWriteStarted(opportunity.id, reservationId);
     writeStarted = true;
     await onWriteStarted?.();
@@ -1656,7 +1658,6 @@ async function executeReviewedDeliveryCore(input: DeliveryCoreInput): Promise<De
     }
     return latest;
   } catch (error) {
-    if (error instanceof DeliveryControlStoppedError) throw error;
     if (reservationId && !writeStarted) {
       const released = await releaseReviewedDeliveryQuota(opportunity.id, reservationId).catch(() => false);
       if (released) {
@@ -1669,7 +1670,7 @@ async function executeReviewedDeliveryCore(input: DeliveryCoreInput): Promise<De
           draftSha256
         }).catch(() => undefined);
       }
-      if (!preWriteReviewRecorded) {
+      if (!preWriteReviewRecorded && !(error instanceof DeliveryControlStoppedError)) {
         await recordReviewedDeliveryAttempt({
           opportunityId: opportunity.id,
           requestId: crypto.randomUUID(),
@@ -1785,7 +1786,8 @@ async function confirmReviewedSend(
   sender: chrome.runtime.MessageSender,
   opportunityId: string,
   draftRevisionId: string,
-  draftSha256: string
+  draftSha256: string,
+  beforeWrite?: () => Promise<void>
 ): Promise<DeliveryRecord> {
   if (!isTrustedOptionsSender(sender)) throw new Error("只能从扩展管理页确认人工发送");
   if ((await loadSettings()).executionPolicy === "draft_only") {
@@ -1815,7 +1817,8 @@ async function confirmReviewedSend(
       draftRevisionId,
       draftSha256,
       authorizationEvidenceCode: "user_confirmed",
-      settings: await loadSettings()
+      settings: await loadSettings(),
+      beforeWrite
     });
     await notifyState();
     if (lease.openedByExtension && latest.overallStatus === "succeeded") {
@@ -1828,6 +1831,72 @@ async function confirmReviewedSend(
   }
   } finally {
     reviewedSendExecuting.delete(opportunityId);
+  }
+}
+
+async function reviewAndSend(sender: chrome.runtime.MessageSender, opportunityId: string): Promise<DeliveryRecord> {
+  if (!isTrustedOptionsSender(sender)) throw new Error("只能从扩展管理页确认投递");
+  if (reviewAndSendInFlight.has(opportunityId) || reviewedSendExecuting.has(opportunityId)) {
+    throw new Error("该职位投递流程正在执行");
+  }
+  reviewAndSendInFlight.add(opportunityId);
+  try {
+    return await runUserGenerationOnce(opportunityId, async () => {
+      const auth = await getAuthProjection();
+      if (auth.status !== "signed_in" || !auth.userId) throw new Error("请先登录");
+      const ownerId = auth.userId;
+      const assertContext = async (expectedStatus: OpportunityRecord["status"]) => {
+        const currentAuth = await getAuthProjection();
+        if (currentAuth.status !== "signed_in" || currentAuth.userId !== ownerId) {
+          throw new Error("登录账号已变化，请重新操作");
+        }
+        if ((await loadSettings()).executionPolicy === "draft_only") {
+          throw new Error("当前为仅生成模式，不能发起真实投递");
+        }
+        const opportunity = (await listOpportunities()).find((item) => item.id === opportunityId);
+        if (!opportunity || opportunity.userId !== ownerId) throw new Error("职位记录不存在或不属于当前账号");
+        if (opportunity.platform !== "liepin") throw new Error("当前只支持猎聘职位");
+        if (opportunity.status !== expectedStatus) throw new Error("职位状态已变化，请查看最新记录");
+        return opportunity;
+      };
+      const opportunity = await assertContext("review_required");
+      const run = await getRun();
+      if (run && ["queued", "running", "paused"].includes(run.status)
+        && run.items.some((item) => item.candidate.platform === opportunity.platform
+          && item.candidate.jobId === opportunity.platformJobId)) {
+        throw new Error("该职位仍在批次中，请先结束该批次");
+      }
+      if ((await listDeliveryRecords()).some((item) => item.opportunityId === opportunityId)) {
+        throw new Error("该职位已有投递记录，请在人工发送区核对后处理");
+      }
+      const progress = async (stage: "generating" | "preflighting" | "sending") => {
+        await chrome.runtime.sendMessage({ type: "REVIEW_AND_SEND_PROGRESS", opportunityId, ownerId, stage })
+          .catch(() => undefined);
+      };
+      // The user's approval resolves suitability review. Preserve that evaluation and
+      // generate a grounded greeting directly; do not ask the model to veto it again.
+      await progress("generating");
+      await assertContext("review_required");
+      await generateForOpportunity(opportunityId);
+      await assertContext("draft_ready");
+      const identity = await loadCurrentDraftIdentity(opportunityId);
+      const assertReady = async () => {
+        await assertContext("draft_ready");
+        const current = await loadCurrentDraftIdentity(opportunityId);
+        if (current.draftRevisionId !== identity.draftRevisionId || current.draftSha256 !== identity.draftSha256) {
+          throw new Error("草稿内容已变化，请重新确认");
+        }
+      };
+      await progress("preflighting");
+      await prepareReviewedSend(sender, opportunityId, identity.draftRevisionId, identity.draftSha256);
+      await assertReady();
+      await progress("sending");
+      return confirmReviewedSend(sender, opportunityId, identity.draftRevisionId, identity.draftSha256, assertReady);
+    });
+  } finally {
+    reviewedSendLeases.delete(opportunityId);
+    reviewAndSendInFlight.delete(opportunityId);
+    await notifyState();
   }
 }
 
@@ -1865,6 +1934,10 @@ async function handleRequest(
   request: RuntimeRequest,
   sender: chrome.runtime.MessageSender
 ): Promise<unknown> {
+  if ("opportunityId" in request && reviewAndSendInFlight.has(request.opportunityId)
+    && request.type !== "REVIEW_AND_SEND_PROGRESS") {
+    throw new Error("该职位投递流程正在执行，请稍候");
+  }
   switch (request.type) {
     case "OPEN_SIDE_PANEL":
       await openSidePanel(sender);
@@ -1977,6 +2050,8 @@ async function handleRequest(
       return prepareReviewedSend(sender, request.opportunityId, request.draftRevisionId, request.draftSha256);
     case "CONFIRM_REVIEWED_SEND":
       return confirmReviewedSend(sender, request.opportunityId, request.draftRevisionId, request.draftSha256);
+    case "REVIEW_AND_SEND":
+      return reviewAndSend(sender, request.opportunityId);
     case "EDIT_DRAFT": {
       const settings = await loadSettings();
       await invokeModel("edit_draft", {
@@ -2011,6 +2086,7 @@ async function handleRequest(
     }
     case "CONTENT_SCAN":
     case "RUN_UPDATED":
+    case "REVIEW_AND_SEND_PROGRESS":
       return undefined;
   }
 }

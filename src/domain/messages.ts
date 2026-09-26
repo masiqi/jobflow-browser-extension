@@ -221,6 +221,13 @@ export const resumeProfileSchema = z.object({
   constraints: z.array(z.string().min(1).max(300)).max(30)
 }).strict();
 
+export const reviewAndSendProgressSchema = z.object({
+  type: z.literal("REVIEW_AND_SEND_PROGRESS"),
+  opportunityId: z.string().uuid(),
+  ownerId: z.string().uuid(),
+  stage: z.enum(["generating", "preflighting", "sending"])
+}).strict();
+
 export const runtimeRequestSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("OPEN_SIDE_PANEL") }).strict(),
   z.object({ type: z.literal("GET_LAUNCHER_VISIBILITY") }).strict(),
@@ -261,6 +268,8 @@ export const runtimeRequestSchema = z.discriminatedUnion("type", [
     error: z.string().max(500)
   }).strict(),
   z.object({ type: z.literal("RETRY_STORED_OPPORTUNITY"), opportunityId: z.string().uuid() }).strict(),
+  z.object({ type: z.literal("REVIEW_AND_SEND"), opportunityId: z.string().uuid() }).strict(),
+  reviewAndSendProgressSchema,
   reviewedSendIdentitySchema.extend({ type: z.literal("PREPARE_REVIEWED_SEND") }).strict(),
   reviewedSendIdentitySchema.extend({ type: z.literal("CONFIRM_REVIEWED_SEND") }).strict(),
   z.object({ type: z.literal("EDIT_DRAFT"), opportunityId: z.string().uuid(), text: z.string().min(1).max(200) }).strict(),

@@ -12,6 +12,15 @@ import {
 import { normalizeChatCompletionsEndpoint } from "../src/llm";
 
 describe("runtime and endpoint contracts", () => {
+  it("binds one-click reviewed sending only to an opportunity UUID", () => {
+    const request = { type: "REVIEW_AND_SEND", opportunityId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" };
+    expect(decodeRuntimeRequest(request)).toEqual(request);
+    for (const extra of [{ text: "arbitrary message" }, { draftRevisionId: request.opportunityId }, { platform: "zhaopin" }, { bypass: true }]) {
+      expect(() => decodeRuntimeRequest({ ...request, ...extra })).toThrow();
+    }
+    expect(() => decodeRuntimeRequest({ ...request, opportunityId: "invalid" })).toThrow();
+  });
+
   it("accepts both supported platform identities while keeping the shared candidate shape strict", () => {
     expect(platformSchema.parse("liepin")).toBe("liepin");
     expect(platformSchema.parse("zhaopin")).toBe("zhaopin");

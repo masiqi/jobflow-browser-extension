@@ -140,7 +140,7 @@ Runtime requests:
 - Decode unknown once in src/domain/messages.ts.
 - Use a discriminated type field.
 - Reject unknown fields with strict Zod objects.
-- Live behavior exists only in strict reviewed-send prepare/confirm commands or in a side-panel `automatic_send` batch whose selected IDs and execution policy were explicitly authorized at start. Page-load, scan, settings save, startup, scroll, pagination, upload, and free-form platform commands cannot write to Liepin.
+- Live behavior exists only in strict reviewed-send prepare/confirm commands, explicit options-page `REVIEW_AND_SEND`, or in a side-panel `automatic_send` batch whose selected IDs and execution policy were explicitly authorized at start. Page-load, scan, settings save, startup, scroll, pagination, upload, and free-form platform commands cannot write to Liepin.
 - Content scan returns sourceUrl plus at most 500 decoded list candidates.
 - A batch accepts 1 through 500 selected platform job IDs from the current scan snapshot. There is no separate per-batch selection limit below that structural cap. Batch start is accepted only from the exact extension side panel URL, must include the expected execution policy, must match trusted settings, and must fail if another queued/running/paused run already exists.
 - Stored-detail retry accepts only an opportunity UUID. JD text, profile data, model credentials, and status cannot be supplied by the page command.
@@ -585,3 +585,65 @@ await waitForPageReady();
 element.focus({ preventScroll: true });
 element.click();
 ~~~
+
+## Scenario: One-click human review and delivery (2026-09-26)
+
+### 1. Scope / Trigger
+
+The options record center can combine generation, preflight and confirmed delivery
+for one pending-review Liepin record. The user explicitly approved this shortcut.
+
+### 2. Signatures
+
+~~~typescript
+{ type: "REVIEW_AND_SEND", opportunityId: string /* UUID */ }
+{ type: "REVIEW_AND_SEND_PROGRESS", opportunityId: string, ownerId: string,
+  stage: "generating" | "preflighting" | "sending" }
+~~~
+
+### 3. Contracts
+
+- Accept only the exact trusted options page, signed-in owner, pending-review
+  Liepin record and a policy that allows writes.
+- Generate a validated greeting directly from the stored JD and active approved
+  profile. Human approval does not repeat model suitability evaluation; preserve
+  original rule/model history.
+- Bind the persisted draft revision and SHA-256 to existing prepare/confirm and
+  delivery primitives. Preserve manual evidence semantics, quota and write locks.
+- Guard the complete operation against duplicate generation/delivery and
+  conflicting record edits/exclusion. Recheck identity and policy before writing.
+- Display immediate busy acknowledgement and generation/preflight/delivery
+  stages across RUN_UPDATED and re-renders. Never start from rendering/reload.
+- Progress notifications are display-only, strictly decoded and matched to the
+  active opportunity/owner. Ignore notifications from content tabs. Keep the
+  selected record detail visible when its status leaves the current filter.
+- Zhaopin and draft-only mode retain generation-only actions.
+
+### 4. Validation & Error Matrix
+
+| Condition | Result |
+| --- | --- |
+| Content/side-panel sender, wrong owner/platform/state, draft-only policy | Reject before generation or platform actions |
+| Duplicate click/message or conflicting edit/exclude | Block concurrent work |
+| Invalid greeting or failed preflight | Stop; no live send |
+| Owner/policy/revision changed before write | Stop before live send |
+| Partial/unverified post-write result | Preserve component history; no automatic replay |
+
+### 5. Good/Base/Bad Cases
+
+- Good: a human-approved review generates one grounded greeting and runs one
+  job-bound delivery without a second modal.
+- Base: a draft-only or Zhaopin record only generates a draft.
+- Bad: schedule a send merely because the record became draft_ready.
+
+### 6. Tests Required
+
+Assert exact command decoding, accepted/rejected senders, ownership/platform/state
+and policy, duplicate/conflicting requests, no writes on failed generation or
+preflight, final identity checks, stage feedback and re-render persistence.
+
+### 7. Wrong vs Correct
+
+Wrong: watch all draft_ready rows and send whenever account policy allows it.
+Correct: one explicit REVIEW_AND_SEND authorizes only the selected opportunity;
+background binds the validated persisted revision and finishes or stops once.

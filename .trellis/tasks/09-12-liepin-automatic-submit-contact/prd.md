@@ -19,6 +19,11 @@ Allow a job seeker to choose an `automatic_send` execution policy so that one se
 
 ## Requirements
 
+The 2026-09-26 user-approved [single-click review amendment](one-click-review.md)
+adds a separate options-page action for pending-review Liepin records. It
+supersedes the three-click requirement for that path only; the automatic batch
+requirements below remain scoped to side-panel batches.
+
 ### Execution Policy
 
 - Add an explicit execution-policy setting with `draft_only`, `reviewed_send`, and `automatic_send` values.
