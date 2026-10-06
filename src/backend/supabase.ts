@@ -379,27 +379,52 @@ export async function recordJobDetails(
 }
 
 export async function listOpportunities(): Promise<OpportunityRecord[]> {
-  const client = await getSupabaseClient();
-  const { data, error } = await client.from("job_opportunities")
-    .select("*")
-    .order("last_seen_at", { ascending: false })
-    .limit(500);
-  if (error) throw new Error("读取职位记录失败");
-  return z.array(opportunityRowSchema).parse(data).map(mapOpportunity);
+  const rows = await readAllRows("job_opportunities", opportunityRowSchema, "id", "读取职位记录失败");
+  return rows.sort((left, right) => right.last_seen_at.localeCompare(left.last_seen_at))
+    .map(mapOpportunity);
 }
 
-export async function listDrafts(): Promise<MessageDraft[]> {
+export async function getOpportunity(opportunityId: string): Promise<OpportunityRecord | null> {
   const client = await getSupabaseClient();
-  const [draftsResult, revisionsResult] = await Promise.all([
-    client.from("message_drafts").select("*").limit(500),
-    client.from("draft_revisions").select("*").order("created_at", { ascending: true }).limit(2000)
-  ]);
-  if (draftsResult.error || revisionsResult.error) throw new Error("读取待发消息失败");
-  const revisions = z.array(revisionRowSchema).parse(revisionsResult.data);
-  return z.array(draftRowSchema).parse(draftsResult.data).map((row) => ({
+  const { data, error } = await client.from("job_opportunities").select("*")
+    .eq("id", opportunityId).maybeSingle();
+  if (error) throw new Error("读取职位记录失败");
+  return data ? mapOpportunity(opportunityRowSchema.parse(data)) : null;
+}
+
+// Advance by an immutable unique key, not by the requested page size: hosted
+// PostgREST may cap a response below our limit. A short page is not EOF.
+async function readAllRows<T extends Record<string, unknown>>(
+  table: string,
+  schema: z.ZodType<T>,
+  cursorColumn: keyof T & string,
+  errorMessage: string,
+  opportunityId?: string
+): Promise<T[]> {
+  const client = await getSupabaseClient();
+  const rows: T[] = [];
+  let cursor: string | undefined;
+  while (true) {
+    let query = client.from(table).select("*").order(cursorColumn, { ascending: true }).limit(500);
+    if (opportunityId) query = query.eq("opportunity_id", opportunityId);
+    if (cursor) query = query.gt(cursorColumn, cursor);
+    const { data, error } = await query;
+    if (error) throw new Error(errorMessage);
+    const page = z.array(schema).parse(data);
+    if (page.length === 0) return rows;
+    const nextCursor = z.string().parse(page[page.length - 1]![cursorColumn]);
+    if (cursor && nextCursor <= cursor) throw new Error(errorMessage);
+    rows.push(...page);
+    cursor = nextCursor;
+  }
+}
+
+function mapDraft(row: z.infer<typeof draftRowSchema>, revisions: z.infer<typeof revisionRowSchema>[]): MessageDraft {
+  return {
     opportunityId: row.opportunity_id,
     currentText: row.current_text,
-    revisions: revisions.filter((revision) => revision.opportunity_id === row.opportunity_id).map((revision) => {
+    revisions: revisions.sort((left, right) => left.created_at.localeCompare(right.created_at)
+      || left.id.localeCompare(right.id)).map((revision) => {
       const metadata = revision.model_metadata;
       const route = metadata?.route;
       const provider = metadata?.provider;
@@ -426,7 +451,34 @@ export async function listDrafts(): Promise<MessageDraft[]> {
       };
     }),
     updatedAt: row.updated_at
-  }));
+  };
+}
+
+export async function listDrafts(): Promise<MessageDraft[]> {
+  const [drafts, revisions] = await Promise.all([
+    readAllRows("message_drafts", draftRowSchema, "opportunity_id", "读取待发消息失败"),
+    readAllRows("draft_revisions", revisionRowSchema, "id", "读取待发消息失败")
+  ]);
+  const revisionsByOpportunity = new Map<string, z.infer<typeof revisionRowSchema>[]>();
+  for (const revision of revisions) {
+    const group = revisionsByOpportunity.get(revision.opportunity_id) ?? [];
+    group.push(revision);
+    revisionsByOpportunity.set(revision.opportunity_id, group);
+  }
+  return drafts.map((row) => mapDraft(row, revisionsByOpportunity.get(row.opportunity_id) ?? []));
+}
+
+// Authoritative send lookups are scoped to this opportunity through the signed-in
+// client's RLS. A management-list window must never determine whether it exists.
+export async function getDraft(opportunityId: string): Promise<MessageDraft | null> {
+  const client = await getSupabaseClient();
+  const { data, error } = await client.from("message_drafts").select("*")
+    .eq("opportunity_id", opportunityId).maybeSingle();
+  if (error) throw new Error("读取待发消息失败");
+  if (!data) return null;
+  const row = draftRowSchema.parse(data);
+  const revisions = await readAllRows("draft_revisions", revisionRowSchema, "id", "读取待发消息失败", opportunityId);
+  return mapDraft(row, revisions);
 }
 
 export async function prepareReviewedDelivery(

@@ -28,6 +28,9 @@ parseSuitabilityDecision(raw: unknown, job: DetailJob, profile: ResumeProfile): 
 parseGreetingDecision(raw: unknown, job: DetailJob, profile: ResumeProfile): GreetingDecision
 isLiepinListPage(location: Location): boolean
 scanLiepinList(root: ParentNode): ListCandidate[]
+getOpportunity(opportunityId: string): Promise<OpportunityRecord | null>
+getDraft(opportunityId: string): Promise<MessageDraft | null>
+listDrafts(): Promise<MessageDraft[]>
 ~~~
 
 Stored-detail retry runtime command:
@@ -156,6 +159,14 @@ Opportunity identity:
 - The database key is user_id + platform + platform_job_id.
 - No URL, title, company, recruiter, hash, or similarity participates.
 - Processing RPCs verify that job.platform and job.jobId match the owned record.
+- A send target and its current draft identity must be fetched by exact owned
+  opportunity ID. A capped history list is not authoritative evidence that a
+  draft or opportunity is absent. Revisions must match the current draft text;
+  never fabricate a revision or weaken the hash check to work around truncation.
+- Full opportunity/draft/revision collections page by immutable unique UUID key
+  (`id` or `opportunity_id`) and continue until an empty result. Preserve UI sort
+  order after retrieval. A server response cap may be lower than the requested
+  page size; page errors or a non-advancing cursor must fail the whole read.
 
 State:
 
@@ -355,6 +366,9 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 | PREPARE succeeds | Persist awaiting_confirmation; consume no daily unit and perform no Liepin click/fill |
 | Final preflight differs or fails | Stop before write; release any unused reservation |
 | Content lease/hash differs | Reject without platform interaction |
+| More than 500 drafts / more than the API row cap | Exact send lookup still finds the current owned draft; history pagination does not omit it |
+| A history page is shorter than requested due to server cap | Continue by stable cursor until an empty page; do not assume completion |
+| Any history page fails or is malformed | Reject the read; do not return a partial history as authoritative data |
 | `聊一聊` sends a platform default greeting | Record application/contact attempt only; do not treat it as the reviewed custom greeting |
 | Liepin IM bundle appears between 4 and 15 seconds after `聊一聊` | Continue bounded discovery, then bind only a unique chat-local surface |
 | One visible `.im-ui-chat-input` contains one `.im-ui-textarea` and one `.im-ui-basic-send-btn` | Use that exact surface even when the send control is not a `button`/`a` or the surface contains another text input |
@@ -386,6 +400,10 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 - Good: user A scans job 123, Edge reloads user A active profile through RLS, stores one evaluation and one evidence-backed draft, and user B sees none of it.
 - Base: a signed-out/default build renders account setup but cannot start backend or reviewed-send work.
 - Good: the same platform job ID appears on another page; metadata updates and no model call repeats.
+- Good: a newly generated 501st draft has its current revision fetched by exact
+  opportunity ID; existing older excluded jobs remain visible to deduplication.
+- Bad: infer “current revision missing” from a global first-500 draft window, or
+  assume that increasing limit bypasses the hosted API's own row cap.
 - Good: a model-excluded record receives a user_override event and generation-only processing while the original exclusion stays visible.
 - Good: resume import immediately shows local parsing/storage/model stages and prevents a second import until completion.
 - Good: the user explicitly scans `c.liepin.com/`; already-rendered job cards are extracted without operating the page.
@@ -436,6 +454,9 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 For every contract change, update the nearest focused test and rerun the full gates:
 
 - tests/contracts.test.ts: RuntimeRequest and build/Endpoint schemas.
+- Backend read regressions must exercise more than 500 drafts, more than 1000
+  revisions, and a smaller simulated server row cap; verify complete histories,
+  exact target queries, missing/mismatched revision rejection and page errors.
 - tests/storage.test.ts: device owner, BYOK isolation, malformed persisted data.
 - tests/batch-persistence.test.ts: accepted details keep the stored batch schema valid and terminal first-item outcomes advance to the next queued item.
 - tests/domain.test.ts and tests/batch.test.ts: exhaustive projections and transitions.

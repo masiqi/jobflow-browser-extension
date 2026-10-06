@@ -4,6 +4,7 @@ import type { ExtensionSettings, OpportunityRecord, ResumeProfile } from "../src
 
 const backend = vi.hoisted(() => ({
   getAuthProjection: vi.fn(),
+  getOpportunity: vi.fn(),
   invokeModelGateway: vi.fn(),
   listOpportunities: vi.fn(),
   listResumeProfiles: vi.fn()
@@ -140,6 +141,8 @@ describe("stored opportunity retry", () => {
       vip: true
     });
     backend.listOpportunities.mockResolvedValue([failedOpportunity()]);
+    backend.getOpportunity.mockImplementation(async (id: string) =>
+      (await backend.listOpportunities()).find((item: OpportunityRecord) => item.id === id) ?? null);
     backend.listResumeProfiles.mockResolvedValue([activeProfile()]);
     storage.loadSettings.mockResolvedValue(managedSettings());
     storage.getByokKey.mockResolvedValue("");

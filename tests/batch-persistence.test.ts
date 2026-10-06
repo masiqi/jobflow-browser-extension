@@ -14,6 +14,8 @@ import type {
 
 const backend = vi.hoisted(() => ({
   getAuthProjection: vi.fn(),
+  getDraft: vi.fn(),
+  getOpportunity: vi.fn(),
   invokeModelGateway: vi.fn(),
   listDeliveryRecords: vi.fn(),
   listDrafts: vi.fn(),
@@ -364,6 +366,10 @@ describe("batch run persistence", () => {
     backend.listDrafts.mockResolvedValue([]);
     backend.listEvaluations.mockResolvedValue([]);
     backend.listOpportunities.mockResolvedValue([opportunity()]);
+    backend.getOpportunity.mockImplementation(async (id: string) =>
+      (await backend.listOpportunities()).find((item: OpportunityRecord) => item.id === id) ?? null);
+    backend.getDraft.mockImplementation(async (id: string) =>
+      (await backend.listDrafts()).find((item: MessageDraft) => item.opportunityId === id) ?? null);
     backend.listOpportunityEvents.mockResolvedValue([]);
     backend.listResumeProfiles.mockResolvedValue([]);
     backend.markReviewedDeliveryWriteStarted.mockResolvedValue(undefined);
@@ -421,6 +427,35 @@ describe("batch run persistence", () => {
     expect(stages.map((message) => message.stage)).toEqual(["generating", "preflighting", "sending"]);
     expect(await dispatchRuntime(oneClickRequest, optionsSender)).toMatchObject({ ok: false });
     expect(modelOperations()).toEqual(["generate_greeting"]);
+  });
+
+  it("uses exact persisted identities for one-click delivery even when the management lists omit the target", async () => {
+    const record = mockOneClickReview();
+    backend.getOpportunity.mockImplementation(async () => record);
+    backend.getDraft.mockImplementation(async () => record.status === "draft_ready" ? draft() : null);
+    backend.listOpportunities.mockResolvedValue([]);
+    backend.listDrafts.mockResolvedValue([]);
+    const result = await dispatchRuntime(oneClickRequest, optionsSender);
+    expect(result).toMatchObject({ ok: true, data: { overallStatus: "succeeded" } });
+    expect(backend.getOpportunity).toHaveBeenCalledWith(opportunityId);
+    expect(backend.getDraft).toHaveBeenCalledWith(opportunityId);
+    expect(backend.listOpportunities).not.toHaveBeenCalled();
+    expect(backend.listDrafts).not.toHaveBeenCalled();
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(101, expect.objectContaining({ type: "CONTENT_REVIEWED_SEND_EXECUTE" }));
+  });
+
+  it.each(["missing_draft", "missing_revision", "mismatched_text"])("fails closed before opening a tab when the exact draft has %s", async (condition) => {
+    mockOneClickReview();
+    backend.getDraft.mockResolvedValue(condition === "missing_draft" ? null : {
+      ...draft(),
+      revisions: condition === "missing_revision" ? [] : draft().revisions.map((revision) => ({ ...revision, text: "different text" }))
+    });
+    expect(await dispatchRuntime(oneClickRequest, optionsSender)).toMatchObject({ ok: false, error: "当前草稿修订不存在" });
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+    expect(chrome.tabs.sendMessage).not.toHaveBeenCalled();
+    expect(backend.prepareReviewedDelivery).not.toHaveBeenCalled();
+    expect(backend.reserveReviewedDeliveryQuota).not.toHaveBeenCalled();
+    expect(backend.markReviewedDeliveryWriteStarted).not.toHaveBeenCalled();
   });
 
   it.each(["sender", "platform", "state", "owner", "policy", "delivery", "batch"])("rejects one-click review for invalid %s before generation or platform actions", async (condition) => {

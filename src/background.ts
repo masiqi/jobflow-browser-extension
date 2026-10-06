@@ -4,6 +4,8 @@ import {
   appendUserEvent,
   deleteMyProductData,
   getAuthProjection,
+  getDraft,
+  getOpportunity,
   invokeModelGateway,
   loadActiveFilterConfig,
   listDeliveryRecords,
@@ -1158,8 +1160,7 @@ function detailJobFromOpportunity(opportunity: OpportunityRecord): DetailJob {
 }
 
 async function findOpportunityAndProfile(opportunityId: string) {
-  const [opportunities, profile] = await Promise.all([listOpportunities(), activeProfile()]);
-  const opportunity = opportunities.find((item) => item.id === opportunityId);
+  const [opportunity, profile] = await Promise.all([getOpportunity(opportunityId), activeProfile()]);
   if (!opportunity || !opportunity.description) throw new Error("职位详情不可用");
   if (!profile) throw new Error("已启用画像不存在");
   const job = detailJobFromOpportunity(opportunity);
@@ -1242,7 +1243,7 @@ function currentDraftRevision(draft: { currentText: string; revisions: Array<{ i
 }
 
 async function loadCurrentDraftIdentity(opportunityId: string): Promise<{ draftText: string; draftRevisionId: string; draftSha256: string }> {
-  const draft = (await listDrafts()).find((item) => item.opportunityId === opportunityId);
+  const draft = await getDraft(opportunityId);
   const revision = draft ? currentDraftRevision(draft) : null;
   if (!draft || !revision) throw new Error("当前草稿修订不存在");
   return {
@@ -1259,12 +1260,10 @@ async function loadReviewedSendIdentity(
 ): Promise<{ opportunity: OpportunityRecord; draftText: string; delivery: DeliveryRecord }> {
   const auth = await getAuthProjection();
   if (auth.status !== "signed_in" || !auth.userId) throw new Error("请先登录");
-  const [opportunities, drafts] = await Promise.all([listOpportunities(), listDrafts()]);
-  const opportunity = opportunities.find((item) => item.id === opportunityId);
+  const [opportunity, draft] = await Promise.all([getOpportunity(opportunityId), getDraft(opportunityId)]);
   if (!opportunity || opportunity.userId !== auth.userId) throw new Error("职位记录不存在或不属于当前账号");
   if (opportunity.platform !== "liepin") throw new Error("当前只支持猎聘职位");
   if (opportunity.status !== "draft_ready") throw new Error("只有已审核草稿可以投递并打招呼");
-  const draft = drafts.find((item) => item.opportunityId === opportunityId);
   const revision = draft ? currentDraftRevision(draft) : null;
   if (!draft || !revision) throw new Error("当前草稿修订不存在");
   if (revision.id !== draftRevisionId) throw new Error("草稿修订已变化，请重新确认");
@@ -1853,7 +1852,7 @@ async function reviewAndSend(sender: chrome.runtime.MessageSender, opportunityId
         if ((await loadSettings()).executionPolicy === "draft_only") {
           throw new Error("当前为仅生成模式，不能发起真实投递");
         }
-        const opportunity = (await listOpportunities()).find((item) => item.id === opportunityId);
+        const opportunity = await getOpportunity(opportunityId);
         if (!opportunity || opportunity.userId !== ownerId) throw new Error("职位记录不存在或不属于当前账号");
         if (opportunity.platform !== "liepin") throw new Error("当前只支持猎聘职位");
         if (opportunity.status !== expectedStatus) throw new Error("职位状态已变化，请查看最新记录");
