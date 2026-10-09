@@ -15,7 +15,12 @@ import type {
 const backend = vi.hoisted(() => ({
   getAuthProjection: vi.fn(),
   getDraft: vi.fn(),
+  getCurrentDraft: vi.fn(),
   getOpportunity: vi.fn(),
+  getOpportunityByPlatform: vi.fn(),
+  listCandidateIdentities: vi.fn(),
+  listOpportunityPage: vi.fn(),
+  loadActiveFilterConfig: vi.fn(),
   invokeModelGateway: vi.fn(),
   listDeliveryRecords: vi.fn(),
   listDrafts: vi.fn(),
@@ -370,6 +375,12 @@ describe("batch run persistence", () => {
       (await backend.listOpportunities()).find((item: OpportunityRecord) => item.id === id) ?? null);
     backend.getDraft.mockImplementation(async (id: string) =>
       (await backend.listDrafts()).find((item: MessageDraft) => item.opportunityId === id) ?? null);
+    backend.getCurrentDraft.mockImplementation((id: string) => backend.getDraft(id));
+    backend.getOpportunityByPlatform.mockImplementation(async (platform: string, jobId: string) =>
+      (await backend.listOpportunities()).find((item: OpportunityRecord) => item.platform === platform && item.platformJobId === jobId) ?? null);
+    backend.listCandidateIdentities.mockImplementation(async () => backend.listOpportunities());
+    backend.listOpportunityPage.mockResolvedValue({ opportunities: [], hasNext: false });
+    backend.loadActiveFilterConfig.mockResolvedValue(null);
     backend.listOpportunityEvents.mockResolvedValue([]);
     backend.listResumeProfiles.mockResolvedValue([]);
     backend.markReviewedDeliveryWriteStarted.mockResolvedValue(undefined);
@@ -478,6 +489,8 @@ describe("batch run persistence", () => {
     backend.invokeModelGateway.mockReturnValue(pendingGeneration.promise);
     const first = dispatchRuntime(oneClickRequest, optionsSender);
     await vi.waitFor(() => expect(backend.invokeModelGateway).toHaveBeenCalledTimes(1));
+    expect(await dispatchRuntime({ type: "GET_APP_STATE", view: "records", opportunityId }, optionsSender))
+      .toMatchObject({ ok: true, data: { recordDetail: { id: opportunityId } } });
     for (const request of [oneClickRequest,
       { type: "REVIEW_DECISION", opportunityId, decision: "permanently_exclude" },
       { type: "REGENERATE_DRAFT", opportunityId },

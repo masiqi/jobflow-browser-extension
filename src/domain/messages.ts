@@ -241,7 +241,15 @@ export const runtimeRequestSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("PAUSE_BATCH") }).strict(),
   z.object({ type: z.literal("RESUME_BATCH") }).strict(),
   z.object({ type: z.literal("CANCEL_BATCH") }).strict(),
-  z.object({ type: z.literal("GET_APP_STATE") }).strict(),
+  z.object({
+    type: z.literal("GET_APP_STATE"),
+    view: z.enum(["sidepanel", "records", "resume", "rules", "model", "account"]).optional(),
+    page: z.number().int().min(0).max(100000).optional(),
+    recordFilter: z.enum(["all", "discovered", "queued", "extracting", "deterministic_excluded", "evaluating", "model_excluded", "review_required", "generating", "draft_ready", "user_excluded", "failed"]).optional(),
+    recordSearch: z.string().max(100).optional(),
+    opportunityId: z.string().uuid().optional(),
+    refresh: z.boolean().optional()
+  }).strict(),
   z.object({ type: z.literal("UPDATE_SETTINGS"), settings: extensionSettingsSchema }).strict(),
   z.object({ type: z.literal("AUTH_REGISTER"), email: z.string().email().max(320), password: z.string().min(8).max(128) }).strict(),
   z.object({ type: z.literal("AUTH_LOGIN"), email: z.string().email().max(320), password: z.string().min(1).max(128) }).strict(),

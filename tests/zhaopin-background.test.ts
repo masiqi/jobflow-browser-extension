@@ -7,6 +7,8 @@ const backend = vi.hoisted(() => ({
   invokeModelGateway: vi.fn(),
   upsertCandidates: vi.fn(),
   listOpportunities: vi.fn(),
+  listCandidateIdentities: vi.fn(),
+  getOpportunityByPlatform: vi.fn(),
   recordJobDetails: vi.fn(),
   loadActiveFilterConfig: vi.fn(),
   listResumeProfiles: vi.fn(),
@@ -125,6 +127,9 @@ beforeEach(async () => {
     vip: false
   });
   backend.listOpportunities.mockResolvedValue([]);
+  backend.listCandidateIdentities.mockImplementation(() => backend.listOpportunities());
+  backend.getOpportunityByPlatform.mockImplementation(async (platform: string, jobId: string) =>
+    (await backend.listOpportunities()).find((row: OpportunityRecord) => row.platform === platform && row.platformJobId === jobId) ?? null);
   backend.recordJobDetails.mockResolvedValue(undefined);
   backend.upsertCandidates.mockResolvedValue([opportunity()]);
   backend.loadActiveFilterConfig.mockResolvedValue(null);

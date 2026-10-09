@@ -19,6 +19,10 @@ Allow a job seeker to choose an `automatic_send` execution policy so that one se
 
 ## Requirements
 
+The [2026-10-09 egress amendment](egress-optimization.md) replaces global
+GET_APP_STATE history reads with bounded view-specific reads and exact target
+queries while preserving all live-write and deduplication invariants.
+
 The 2026-09-26 user-approved [single-click review amendment](one-click-review.md)
 adds a separate options-page action for pending-review Liepin records. It
 supersedes the three-click requirement for that path only; the automatic batch

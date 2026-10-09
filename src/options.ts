@@ -13,6 +13,7 @@ import {
 } from "./ui/delivery";
 import type {
   AppState,
+  AppStateQuery,
   DeliveryRecord,
   ExtensionSettings,
   OpportunityRecord,
@@ -41,8 +42,12 @@ const app: HTMLDivElement = appElement;
 
 let currentView: ViewName = "records";
 let selectedOpportunityId = "";
-let recordFilter = "all";
+let recordFilter: AppStateQuery["recordFilter"] = "all";
 let recordSearch = "";
+let recordPage = 0;
+let renderVersion = 0;
+let displayedOwnerId: string | undefined;
+const pendingStateReads = new Map<string, Promise<AppState>>();
 let resumeImportBusy = false;
 let resumeImportFeedback: ResumeImportFeedback = { kind: "idle", message: "" };
 let storedRetryBusyOpportunityId = "";
@@ -290,13 +295,9 @@ function modelView(state: AppState): string {
 }
 
 function recordView(state: AppState): string {
-  const query = recordSearch.trim().toLowerCase();
-  const records = state.opportunities.filter((record) => {
-    const matchesStatus = recordFilter === "all" || record.status === recordFilter;
-    const matchesSearch = !query || (record.title + " " + record.company).toLowerCase().includes(query);
-    return matchesStatus && matchesSearch;
-  });
-  const selected = state.opportunities.find((record) => record.id === selectedOpportunityId) ?? records[0];
+  const records = state.opportunities;
+  const selected = state.recordDetail !== undefined ? state.recordDetail
+    : records.find((record) => record.id === selectedOpportunityId) ?? records[0];
   if (selected && !selectedOpportunityId) selectedOpportunityId = selected.id;
   return [
     '<div class="page-heading"><h2>职位记录</h2><p>所有判断、草稿和人工操作都保留追加式历史。</p></div>',
@@ -304,7 +305,11 @@ function recordView(state: AppState): string {
     Object.entries(STATUS_LABELS).map(([value, label]) =>
       '<option value="' + value + '" ' + (recordFilter === value ? "selected" : "") + ">" + label + "</option>"
     ).join(""),
-    '</select><input id="recordSearch" type="search" value="' + escapeHtml(recordSearch) + '" placeholder="搜索职位或公司"></div>',
+    '</select><input id="recordSearch" type="search" maxlength="100" value="' + escapeHtml(recordSearch) + '" placeholder="搜索职位或公司">',
+    '<button id="refreshRecords" type="button">刷新记录</button></div>',
+    '<div class="actions"><button id="previousRecords" type="button" ' + (recordPage === 0 ? "disabled" : "")
+      + '>上一页</button><span>第 ' + String(recordPage + 1) + ' 页</span><button id="nextRecords" type="button" '
+      + (state.recordPage?.hasNext ? "" : "disabled") + '>下一页</button></div>',
     '<div class="record-layout"><div class="record-table">',
     records.map((record) => recordRow(
       record,
@@ -346,7 +351,7 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
   const canRetryStored = record.status === "failed" && Boolean(record.description?.trim());
   const latestRevision = draft?.revisions
     .filter((revision) => revision.text === draft.currentText)
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))[0];
   const retryableDeliveryStatuses = new Set(["ready", "awaiting_confirmation", "partial", "failed", "review_required"]);
   const canPrepareReviewedSend = record.platform === "liepin"
     && !oneClickBusy
@@ -471,14 +476,40 @@ function mainView(state: AppState): string {
   }
 }
 
-async function render(): Promise<void> {
+async function render(refresh = false): Promise<void> {
+  const version = ++renderVersion;
+  const query: AppStateQuery = currentView === "records" ? {
+    view: currentView, page: recordPage, recordFilter, recordSearch,
+    ...(selectedOpportunityId ? { opportunityId: selectedOpportunityId } : {})
+  } : { view: currentView };
+  const key = JSON.stringify(query);
   let state: AppState;
   try {
-    state = await sendCommand<AppState>({ type: "GET_APP_STATE" });
+    let pending = refresh ? undefined : pendingStateReads.get(key);
+    if (!pending) {
+      pending = sendCommand<AppState>({ type: "GET_APP_STATE", ...query, ...(refresh ? { refresh: true } : {}) });
+      pendingStateReads.set(key, pending);
+      const request = pending;
+      void pending.finally(() => {
+        if (pendingStateReads.get(key) === request) pendingStateReads.delete(key);
+      }).catch(() => undefined);
+    }
+    state = await pending;
+    if (version !== renderVersion) return;
   } catch (error) {
+    if (version !== renderVersion) return;
     app.innerHTML = '<div class="fatal">' + escapeHtml(error instanceof Error ? error.message : error) + "</div>";
     return;
   }
+  if (displayedOwnerId !== state.auth.userId) {
+    selectedOpportunityId = "";
+    reviewedSendPreparedOpportunityId = "";
+    reviewedSendFeedback = { opportunityId: "", kind: "idle", message: "" };
+    storedRetryFeedback = { opportunityId: "", kind: "idle", message: "" };
+    reviewAndSendFeedback = { opportunityId: "", kind: "idle", message: "" };
+    pendingStateReads.clear();
+  }
+  displayedOwnerId = state.auth.userId;
   const policyStatus = POLICY_STATUS[state.settings.executionPolicy];
   app.innerHTML = [
     '<aside><div class="brand"><span>JF</span><div><b>JobFlow</b><small>求职草稿助手</small></div></div>',
@@ -594,18 +625,45 @@ function bindActions(state: AppState): void {
   document.querySelectorAll<HTMLElement>("[data-record-id]").forEach((button) => {
     button.addEventListener("click", () => {
       selectedOpportunityId = button.dataset.recordId || "";
+      showRecordLoading();
       void render();
     });
   });
   document.querySelector("#recordFilter")?.addEventListener("change", (event) => {
-    recordFilter = (event.currentTarget as HTMLSelectElement).value;
+    recordFilter = (event.currentTarget as HTMLSelectElement).value as AppStateQuery["recordFilter"];
+    recordPage = 0;
     selectedOpportunityId = "";
+    showRecordLoading();
     void render();
   });
   document.querySelector("#recordSearch")?.addEventListener("change", (event) => {
-    recordSearch = (event.currentTarget as HTMLInputElement).value;
+    recordSearch = (event.currentTarget as HTMLInputElement).value.trim().slice(0, 100);
+    recordPage = 0;
     selectedOpportunityId = "";
+    showRecordLoading();
     void render();
+  });
+  document.querySelector("#previousRecords")?.addEventListener("click", () => {
+    if (recordPage === 0) return;
+    recordPage -= 1;
+    selectedOpportunityId = "";
+    showRecordLoading();
+    void render();
+  });
+  document.querySelector("#nextRecords")?.addEventListener("click", () => {
+    if (!state.recordPage?.hasNext) return;
+    recordPage += 1;
+    selectedOpportunityId = "";
+    showRecordLoading();
+    void render();
+  });
+  document.querySelector("#refreshRecords")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    if (button.disabled) return;
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    button.textContent = "正在刷新";
+    await render(true);
   });
   document.querySelector("#provider")?.addEventListener("change", (event) => {
     const provider = (event.currentTarget as HTMLSelectElement).value;
@@ -638,6 +696,18 @@ function bindActions(state: AppState): void {
   });
 }
 
+function showRecordLoading(): void {
+  document.querySelector(".record-detail")?.setAttribute("aria-busy", "true");
+  document.querySelectorAll<HTMLButtonElement>(".record-detail [data-action], #previousRecords, #nextRecords")
+    .forEach((button) => { button.disabled = true; });
+  const refresh = document.querySelector<HTMLButtonElement>("#refreshRecords");
+  if (refresh) {
+    refresh.disabled = true;
+    refresh.setAttribute("aria-busy", "true");
+    refresh.textContent = "正在加载记录";
+  }
+}
+
 async function handleAction(action: string, target: HTMLElement, state: AppState): Promise<void> {
   if (reviewAndSendBusy && target.dataset.id === reviewAndSendFeedback.opportunityId) return;
   if (action === "review-and-send") {
@@ -665,12 +735,16 @@ async function handleAction(action: string, target: HTMLElement, state: AppState
   target.textContent = ACTION_BUSY_LABELS[action] || "处理中";
   try {
     if (action === "login" || action === "register") {
+      renderVersion += 1;
+      pendingStateReads.clear();
       await sendCommand({
         type: action === "login" ? "AUTH_LOGIN" : "AUTH_REGISTER",
         email: inputValue("email"),
         password: inputValue("password")
       });
     } else if (action === "logout") {
+      renderVersion += 1;
+      pendingStateReads.clear();
       await sendCommand({ type: "AUTH_LOGOUT" });
     } else if (action === "save-interface") {
       await sendCommand({
@@ -723,7 +797,7 @@ async function handleAction(action: string, target: HTMLElement, state: AppState
       const url = target.dataset.url;
       if (url) await chrome.tabs.create({ url, active: true });
     }
-    await render();
+    if (action !== "open-job") await render(true);
     showToast(ACTION_SUCCESS_LABELS[action] || "操作已完成");
   } catch (error) {
     showToast(error instanceof Error ? error.message : String(error), true);
@@ -775,7 +849,7 @@ async function runReviewAndSend(opportunityId: string, state: AppState): Promise
   } finally {
     reviewAndSendBusy = false;
     reviewedSendPreparedOpportunityId = "";
-    await render();
+    await render(true);
   }
 }
 
@@ -811,7 +885,7 @@ async function runStoredOpportunityRetry(opportunityId: string): Promise<void> {
       message: "重试完成，职位处理记录已更新"
     };
     storedRetryBusyOpportunityId = "";
-    await render();
+    await render(true);
   } catch (error) {
     storedRetryFeedback = {
       opportunityId,
@@ -819,7 +893,7 @@ async function runStoredOpportunityRetry(opportunityId: string): Promise<void> {
       message: error instanceof Error ? error.message : String(error)
     };
     storedRetryBusyOpportunityId = "";
-    await render();
+    await render(true);
   }
 }
 
@@ -868,7 +942,7 @@ async function runReviewedSend(confirmSend: boolean, opportunityId: string, draf
       message: confirmSend ? "已执行一次真实发送流程，请查看投递组件状态" : "发送前检查通过，请确认是否真实投递并发送"
     };
     reviewedSendBusyOpportunityId = "";
-    await render();
+    await render(true);
   } catch (error) {
     reviewedSendFeedback = {
       opportunityId,
@@ -877,7 +951,7 @@ async function runReviewedSend(confirmSend: boolean, opportunityId: string, draf
     };
     reviewedSendBusyOpportunityId = "";
     reviewedSendPreparedOpportunityId = "";
-    await render();
+    await render(true);
   }
 }
 
@@ -909,7 +983,7 @@ async function runResumeImport(state: AppState): Promise<void> {
   try {
     await importResume(state);
     updateResumeImportFeedback({ kind: "progress", message: "正在加载画像" }, true);
-    await render();
+    await render(true);
     updateResumeImportFeedback({
       kind: "success",
       message: "画像已生成，请审核并确认允许引用的事实"
@@ -969,9 +1043,6 @@ chrome.runtime.onMessage?.addListener((message: unknown, sender) => {
     && parsed.data.opportunityId === reviewAndSendFeedback.opportunityId
     && parsed.data.ownerId === reviewAndSendOwnerId) {
     updateReviewAndSendProgress(REVIEW_AND_SEND_STAGES[parsed.data.stage]);
-  } else if (reviewAndSendBusy && message && typeof message === "object"
-    && "type" in message && message.type === "RUN_UPDATED") {
-    void render();
   }
 });
 

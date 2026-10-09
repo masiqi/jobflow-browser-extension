@@ -132,6 +132,58 @@ describe("side-panel scan interaction", () => {
     expect(scan.textContent).toContain("扫描当前页");
     expect(scan.classList).toContain("primary");
     expect(scan.querySelector("svg")).not.toBeNull();
+    expect(sendMessage).toHaveBeenCalledWith({ type: "GET_APP_STATE", view: "sidepanel" });
+  });
+
+  it("coalesces notification bursts and never displays a superseded in-flight state", async () => {
+    vi.useFakeTimers();
+    const state = appState(preview(1));
+    let resolveStale!: (response: unknown) => void;
+    const staleRead = new Promise((resolve) => { resolveStale = resolve; });
+    let reads = 0;
+    const sendMessage = vi.fn(async () => {
+      reads += 1;
+      return reads === 2 ? staleRead : { ok: true, data: state };
+    });
+    try {
+      await openSidePanel(sendMessage);
+      const listener = vi.mocked(chrome.runtime.onMessage.addListener).mock.calls[0]![0];
+      for (let i = 0; i < 20; i += 1) listener({ type: "RUN_UPDATED" }, {}, vi.fn());
+      await vi.advanceTimersByTimeAsync(50);
+      expect(reads).toBe(2);
+      for (let i = 0; i < 20; i += 1) listener({ type: "RUN_UPDATED" }, {}, vi.fn());
+      await vi.advanceTimersByTimeAsync(50);
+      expect(reads).toBe(2);
+      resolveStale({ ok: true, data: { ...state, auth: { ...state.auth, email: "stale@example.invalid" } } });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reads).toBe(3);
+      expect(document.body.textContent).not.toContain("stale@example.invalid");
+      expect(sendMessage).toHaveBeenLastCalledWith({ type: "GET_APP_STATE", view: "sidepanel" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("combines scan completion with its pending progress notification into one scoped state read", async () => {
+    vi.useFakeTimers();
+    const state = appState(preview(1));
+    const sendMessage = vi.fn(async (request: { type: string }) => {
+      if (request.type === "SCAN_CURRENT_TAB") {
+        const listener = vi.mocked(chrome.runtime.onMessage.addListener).mock.calls[0]![0];
+        listener({ type: "RUN_UPDATED" }, {}, vi.fn());
+        return { ok: true, data: state.scanPreview };
+      }
+      return { ok: true, data: state };
+    });
+    try {
+      await openSidePanel(sendMessage);
+      document.querySelector<HTMLButtonElement>("#scan")!.click();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(sendMessage.mock.calls.filter(([request]) => request.type === "GET_APP_STATE")).toHaveLength(2);
+      expect(document.querySelector("#scanStatus")?.textContent).toContain("扫描完成");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shows progress immediately, blocks duplicates, and reports completion", async () => {
@@ -200,6 +252,7 @@ describe("side-panel scan interaction", () => {
     const refresh = document.querySelector("#refresh") as HTMLButtonElement;
     refresh.click();
     await vi.waitFor(() => expect(getStateCalls).toBe(2));
+    expect(sendMessage).toHaveBeenLastCalledWith({ type: "GET_APP_STATE", view: "sidepanel", refresh: true });
     expect(refresh.disabled).toBe(true);
     expect(refresh.getAttribute("aria-busy")).toBe("true");
     expect(document.querySelector("#scanStatus")?.textContent).toContain("正在刷新状态");
@@ -406,6 +459,7 @@ describe("side-panel scan interaction", () => {
 
       vi.advanceTimersByTime(1100);
       expect(document.querySelector(".run-wait")?.textContent).toContain("2 秒");
+      expect(sendMessage).toHaveBeenCalledOnce();
 
       state.run.nextWriteEligibleAt = undefined;
       state.run.items[0]!.status = "delivery_ready";

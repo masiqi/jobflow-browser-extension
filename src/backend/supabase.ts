@@ -14,6 +14,8 @@ import type {
   MessageDraft,
   OpportunityEvent,
   OpportunityRecord,
+  OpportunityStatus,
+  PlatformKey,
   ResumeProfile
 } from "../types";
 
@@ -66,6 +68,14 @@ const opportunityRowSchema = z.object({
   latest_reason: z.string().nullable(),
   first_seen_at: z.string(),
   last_seen_at: z.string()
+});
+
+const opportunitySummaryRowSchema = opportunityRowSchema.omit({
+  card_text: true, description: true, recruiter: true, recruiter_title: true, jd_hash: true
+});
+const opportunitySummaryColumns = Object.keys(opportunitySummaryRowSchema.shape).join(",");
+const opportunityIdentityRowSchema = opportunityRowSchema.pick({
+  id: true, platform: true, platform_job_id: true, current_status: true
 });
 
 const draftRowSchema = z.object({
@@ -167,6 +177,15 @@ const chromeAuthStorage = {
 };
 
 let clientPromise: Promise<SupabaseClient> | null = null;
+let authProjectionEpoch = 0;
+let authProjectionCache: { key: string; expiresAt: number; value: AuthProjection } | undefined;
+let authProjectionFlight: { key: string; epoch: number; promise: Promise<AuthProjection> } | undefined;
+
+function invalidateAuthProjection(): void {
+  authProjectionEpoch += 1;
+  authProjectionCache = undefined;
+  authProjectionFlight = undefined;
+}
 
 export function getSupabaseClient(): Promise<SupabaseClient> {
   if (!BACKEND_CONFIG.configured) {
@@ -183,42 +202,86 @@ export function getSupabaseClient(): Promise<SupabaseClient> {
         detectSessionInUrl: false
       }
     }
-  ));
+  )).then((client) => {
+    client.auth.onAuthStateChange(() => invalidateAuthProjection());
+    return client;
+  });
   return clientPromise;
 }
 
 export async function register(email: string, password: string): Promise<AuthProjection> {
   const client = await getSupabaseClient();
+  invalidateAuthProjection();
   const { error } = await client.auth.signUp({ email, password });
+  invalidateAuthProjection();
   if (error) throw new Error("无法注册，请检查输入后重试");
   return getAuthProjection();
 }
 
 export async function login(email: string, password: string): Promise<AuthProjection> {
   const client = await getSupabaseClient();
+  invalidateAuthProjection();
   const { error } = await client.auth.signInWithPassword({ email, password });
+  invalidateAuthProjection();
   if (error) throw new Error("邮箱或密码不正确");
   return getAuthProjection();
 }
 
 export async function logout(): Promise<void> {
   const client = await getSupabaseClient();
+  invalidateAuthProjection();
   await client.auth.signOut();
+  invalidateAuthProjection();
   await chrome.storage.local.remove(STORAGE_KEYS.supabaseSession);
 }
 
-export async function getAuthProjection(): Promise<AuthProjection> {
+// Only display reads opt into this cache. Send/model authorization keeps the
+// default fresh read and remains enforced by the authenticated server RPCs.
+export async function getAuthProjection(options: { cached?: boolean } = {}): Promise<AuthProjection> {
   if (!BACKEND_CONFIG.configured) {
     return { status: "unavailable", error: "尚未配置 Supabase 后端" };
   }
   const client = await getSupabaseClient();
-  const { data, error } = await client.auth.getSession();
-  if (error || !data.session?.user) return { status: "signed_out" };
-  const user = data.session.user;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { data, error } = await client.auth.getSession();
+    if (error || !data.session?.user) {
+      invalidateAuthProjection();
+      return { status: "signed_out" };
+    }
+    const session = data.session;
+    const key = session.user.id + ":" + session.access_token;
+    const epoch = authProjectionEpoch;
+    if (options.cached && authProjectionCache?.key === key && authProjectionCache.expiresAt > Date.now()) {
+      return authProjectionCache.value;
+    }
+    let flight = options.cached && authProjectionFlight?.key === key && authProjectionFlight.epoch === epoch
+      ? authProjectionFlight
+      : undefined;
+    if (!flight) {
+      flight = { key, epoch, promise: loadAuthProjection(client, session.user) };
+      if (options.cached) authProjectionFlight = flight;
+    }
+    let value: AuthProjection;
+    try {
+      value = await flight.promise;
+    } finally {
+      if (authProjectionFlight === flight) authProjectionFlight = undefined;
+    }
+    const current = await client.auth.getSession();
+    if (epoch !== authProjectionEpoch || current.error || current.data.session?.user.id !== session.user.id
+      || current.data.session.access_token !== session.access_token) continue;
+    if (options.cached) authProjectionCache = { key, expiresAt: Date.now() + 30_000, value };
+    return value;
+  }
+  throw new Error("登录状态已变化，请重试");
+}
+
+async function loadAuthProjection(client: SupabaseClient, user: { id: string; email?: string }): Promise<AuthProjection> {
   const [profileResult, entitlementResult] = await Promise.all([
     client.from("profiles").select("email_verification_status").eq("user_id", user.id).maybeSingle(),
     client.rpc("get_my_entitlement")
   ]);
+  if (profileResult.error || entitlementResult.error) throw new Error("读取账号状态失败");
   const profile = profileResult.data && typeof profileResult.data === "object"
     ? profileResult.data as { email_verification_status?: unknown }
     : null;
@@ -357,9 +420,9 @@ export async function upsertCandidates(candidates: ListCandidate[]): Promise<Opp
       education: item.education,
       card_text: item.cardText
     }))
-  });
+  }).select(opportunitySummaryColumns);
   if (error) throw new Error("保存职位列表失败");
-  return z.array(opportunityRowSchema).parse(data).map(mapOpportunity);
+  return z.array(opportunitySummaryRowSchema).parse(data).map(mapOpportunitySummary);
 }
 
 export async function recordJobDetails(
@@ -390,6 +453,73 @@ export async function getOpportunity(opportunityId: string): Promise<Opportunity
     .eq("id", opportunityId).maybeSingle();
   if (error) throw new Error("读取职位记录失败");
   return data ? mapOpportunity(opportunityRowSchema.parse(data)) : null;
+}
+
+export async function getOpportunityByPlatform(platform: PlatformKey, jobId: string): Promise<OpportunityRecord | null> {
+  const client = await getSupabaseClient();
+  const { data, error } = await client.from("job_opportunities").select("*")
+    .eq("platform", platform).eq("platform_job_id", jobId).maybeSingle();
+  if (error) throw new Error("读取职位记录失败");
+  return data ? mapOpportunity(opportunityRowSchema.parse(data)) : null;
+}
+
+export async function listOpportunityPage(input: {
+  page: number;
+  status?: OpportunityStatus;
+  search?: string;
+  pageSize?: number;
+}): Promise<{ opportunities: OpportunityRecord[]; hasNext: boolean }> {
+  const page = z.number().int().min(0).max(100_000).parse(input.page);
+  const pageSize = Math.min(50, z.number().int().min(1).parse(input.pageSize ?? 50));
+  const client = await getSupabaseClient();
+  const rows: z.infer<typeof opportunitySummaryRowSchema>[] = [];
+  const search = input.search?.trim();
+  // Quote the PostgREST operand as well as escaping SQL LIKE metacharacters:
+  // commas/parentheses cannot become filter syntax and %/_ remain literal.
+  const pattern = search ? JSON.stringify("%" + search.replace(/[\\%_]/g, "\\$&") + "%") : undefined;
+  while (rows.length <= pageSize) {
+    let query = client.from("job_opportunities").select(opportunitySummaryColumns)
+      .order("last_seen_at", { ascending: false }).order("id", { ascending: false })
+      .range(page * pageSize + rows.length, page * pageSize + pageSize);
+    if (input.status) query = query.eq("current_status", opportunityRowSchema.shape.current_status.parse(input.status));
+    if (pattern) query = query.or("title.ilike." + pattern + ",company.ilike." + pattern + ",platform_job_id.ilike." + pattern);
+    const { data, error } = await query;
+    if (error) throw new Error("读取职位记录失败");
+    const result = z.array(opportunitySummaryRowSchema).parse(data);
+    if (!result.length) break;
+    if (result.some((row) => rows.some((previous) => previous.id === row.id))) throw new Error("职位列表已变化，请刷新重试");
+    rows.push(...result);
+  }
+  return { opportunities: rows.slice(0, pageSize).map(mapOpportunitySummary), hasNext: rows.length > pageSize };
+}
+
+export async function listCandidateIdentities(candidates: ListCandidate[]): Promise<Array<Pick<OpportunityRecord,
+  "id" | "platform" | "platformJobId" | "status">>> {
+  if (!candidates.length) return [];
+  const client = await getSupabaseClient();
+  const rows: z.infer<typeof opportunityIdentityRowSchema>[] = [];
+  for (const platform of new Set(candidates.map((candidate) => candidate.platform))) {
+    const ids = [...new Set(candidates.filter((candidate) => candidate.platform === platform).map((candidate) => candidate.jobId))];
+    for (let index = 0; index < ids.length; index += 100) {
+      let cursor: string | undefined;
+      while (true) {
+        let query = client.from("job_opportunities").select("id,platform,platform_job_id,current_status")
+          .eq("platform", platform).in("platform_job_id", ids.slice(index, index + 100))
+          .order("id", { ascending: true }).limit(100);
+        if (cursor) query = query.gt("id", cursor);
+        const { data, error } = await query;
+        if (error) throw new Error("读取职位去重记录失败");
+        const result = z.array(opportunityIdentityRowSchema).parse(data);
+        if (!result.length) break;
+        const next = result.at(-1)!.id;
+        if (cursor && next <= cursor) throw new Error("读取职位去重记录失败");
+        rows.push(...result);
+        cursor = next;
+        if (result.length === ids.slice(index, index + 100).length) break;
+      }
+    }
+  }
+  return rows.map((row) => ({ id: row.id, platform: row.platform, platformJobId: row.platform_job_id, status: row.current_status }));
 }
 
 // Advance by an immutable unique key, not by the requested page size: hosted
@@ -479,6 +609,21 @@ export async function getDraft(opportunityId: string): Promise<MessageDraft | nu
   const row = draftRowSchema.parse(data);
   const revisions = await readAllRows("draft_revisions", revisionRowSchema, "id", "读取待发消息失败", opportunityId);
   return mapDraft(row, revisions);
+}
+
+// Send validation needs only the newest revision. Do not filter by current_text:
+// that puts private message content in request URLs and could hide a stale row.
+export async function getCurrentDraft(opportunityId: string): Promise<MessageDraft | null> {
+  const client = await getSupabaseClient();
+  const { data, error } = await client.from("message_drafts").select("opportunity_id,current_text,updated_at")
+    .eq("opportunity_id", opportunityId).maybeSingle();
+  if (error) throw new Error("读取待发消息失败");
+  if (!data) return null;
+  const row = draftRowSchema.parse(data);
+  const result = await client.from("draft_revisions").select("*").eq("opportunity_id", opportunityId)
+    .order("created_at", { ascending: false }).order("id", { ascending: false }).limit(1);
+  if (result.error) throw new Error("读取待发消息失败");
+  return mapDraft(row, z.array(revisionRowSchema).parse(result.data));
 }
 
 export async function prepareReviewedDelivery(
@@ -578,8 +723,31 @@ export async function recordReviewedDeliveryAttempt(input: {
   return mapDeliveryRecord(deliveryRecordRowSchema.parse(data));
 }
 
-export async function listDeliveryRecords(): Promise<DeliveryRecord[]> {
+export async function listDeliveryRecords(opportunityIds?: string[]): Promise<DeliveryRecord[]> {
+  if (opportunityIds?.length === 0) return [];
   const client = await getSupabaseClient();
+  if (opportunityIds) {
+    const rows: z.infer<typeof deliveryRecordRowSchema>[] = [];
+    const ids = [...new Set(opportunityIds)];
+    for (let index = 0; index < ids.length; index += 100) {
+      let cursor: string | undefined;
+      while (true) {
+        let query = client.from("delivery_records").select("*").in("opportunity_id", ids.slice(index, index + 100))
+          .order("opportunity_id", { ascending: true }).limit(100);
+        if (cursor) query = query.gt("opportunity_id", cursor);
+        const { data, error } = await query;
+        if (error) throw new Error("读取投递记录失败");
+        const result = z.array(deliveryRecordRowSchema).parse(data);
+        if (!result.length) break;
+        const next = result.at(-1)!.opportunity_id;
+        if (cursor && next <= cursor) throw new Error("读取投递记录失败");
+        rows.push(...result);
+        cursor = next;
+        if (result.length === ids.slice(index, index + 100).length) break;
+      }
+    }
+    return rows.sort((left, right) => right.updated_at.localeCompare(left.updated_at)).map(mapDeliveryRecord);
+  }
   const { data, error } = await client.from("delivery_records")
     .select("*")
     .order("updated_at", { ascending: false })
@@ -606,14 +774,16 @@ export async function listDeliveryAttempts(): Promise<DeliveryAttempt[]> {
   }));
 }
 
-export async function listEvaluations(): Promise<EvaluationRecord[]> {
+export async function listEvaluations(opportunityId?: string): Promise<EvaluationRecord[]> {
   const client = await getSupabaseClient();
-  const { data, error } = await client.from("evaluations")
+  const { data, error } = opportunityId
+    ? { data: await readAllRows("evaluations", evaluationRowSchema, "id", "读取模型评估失败", opportunityId), error: null }
+    : await client.from("evaluations")
     .select("*")
     .order("created_at", { ascending: false })
     .limit(500);
   if (error) throw new Error("读取模型评估失败");
-  return z.array(evaluationRowSchema).parse(data).map((row) => ({
+  return z.array(evaluationRowSchema).parse(data).sort((left, right) => right.created_at.localeCompare(left.created_at)).map((row) => ({
     id: row.id,
     opportunityId: row.opportunity_id,
     outcome: row.outcome,
@@ -635,14 +805,16 @@ export async function listEvaluations(): Promise<EvaluationRecord[]> {
   }));
 }
 
-export async function listOpportunityEvents(): Promise<OpportunityEvent[]> {
+export async function listOpportunityEvents(opportunityId?: string): Promise<OpportunityEvent[]> {
   const client = await getSupabaseClient();
-  const { data, error } = await client.from("opportunity_events")
+  const { data, error } = opportunityId
+    ? { data: await readAllRows("opportunity_events", eventRowSchema, "id", "读取职位历史失败", opportunityId), error: null }
+    : await client.from("opportunity_events")
     .select("*")
     .order("created_at", { ascending: true })
     .limit(5000);
   if (error) throw new Error("读取职位历史失败");
-  return z.array(eventRowSchema).parse(data).map((row) => ({
+  return z.array(eventRowSchema).parse(data).sort((left, right) => left.created_at.localeCompare(right.created_at)).map((row) => ({
     id: row.id,
     opportunityId: row.opportunity_id,
     kind: row.kind,
@@ -718,6 +890,10 @@ export async function appendUserEvent(
     event_payload: payload
   });
   if (error) throw new Error("更新职位记录失败");
+}
+
+function mapOpportunitySummary(row: z.infer<typeof opportunitySummaryRowSchema>): OpportunityRecord {
+  return mapOpportunity({ ...row, card_text: "", description: null, recruiter: null, recruiter_title: null, jd_hash: null });
 }
 
 function mapOpportunity(row: z.infer<typeof opportunityRowSchema>): OpportunityRecord {

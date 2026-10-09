@@ -114,6 +114,11 @@ let scanFeedback: ScanFeedback = { kind: "idle", message: "" };
 let selectedJobIds: Set<string> | null = null;
 let selectedSourceUrl = "";
 let waitCountdownTimer: number | null = null;
+let pendingRender: Promise<void> | null = null;
+let renderAgain = false;
+let forceRefresh = false;
+let notificationTimer: number | null = null;
+let displayedOwnerId: string | undefined;
 
 function iconButton(
   id: string,
@@ -281,18 +286,40 @@ function recordsMarkup(records: OpportunityRecord[], deliveries: DeliveryRecord[
   }).join("") || '<p class="empty">暂无职位记录。</p>';
 }
 
-async function render(stateOverride?: AppState): Promise<void> {
-  let state: AppState;
-  if (stateOverride) {
-    state = stateOverride;
-  } else {
-    try {
-      state = await sendCommand<AppState>({ type: "GET_APP_STATE" });
-    } catch (error) {
-      app.innerHTML = '<div class="error">' + escapeHtml(error instanceof Error ? error.message : error) + "</div>";
-      return;
-    }
+function render(refresh = false): Promise<void> {
+  if (notificationTimer !== null) window.clearTimeout(notificationTimer);
+  notificationTimer = null;
+  forceRefresh ||= refresh;
+  if (pendingRender) {
+    renderAgain = true;
+    return pendingRender;
   }
+  pendingRender = loadAndRender().finally(() => { pendingRender = null; });
+  return pendingRender;
+}
+
+async function loadAndRender(): Promise<void> {
+  do {
+    renderAgain = false;
+    const refresh = forceRefresh;
+    forceRefresh = false;
+    try {
+      const state = await sendCommand<AppState>({ type: "GET_APP_STATE", view: "sidepanel", ...(refresh ? { refresh: true } : {}) });
+      // A newer notification/action supersedes this response. Fetch once more,
+      // not once for every progress event arriving while the read was in flight.
+      if (!renderAgain) drawState(state);
+    } catch (error) {
+      if (!renderAgain) throw error;
+    }
+  } while (renderAgain);
+}
+
+function drawState(state: AppState): void {
+  if (displayedOwnerId !== state.auth.userId) {
+    selectedJobIds = null;
+    selectedSourceUrl = "";
+  }
+  displayedOwnerId = state.auth.userId;
   const run = state.run;
   const platform = platformForState(state.scanPreview, run);
   const selectedJobs = selectedJobsForState(state.scanPreview, run);
@@ -471,10 +498,10 @@ async function refreshState(): Promise<void> {
   updateRefreshControl();
   updateScanFeedback({ kind: "progress", message: "正在刷新状态" }, false);
   try {
-    const state = await sendCommand<AppState>({ type: "GET_APP_STATE" });
+    await render(true);
     refreshBusy = false;
-    scanFeedback = { kind: "success", message: "状态已刷新" };
-    await render(state);
+    updateRefreshControl();
+    updateScanFeedback({ kind: "success", message: "状态已刷新" }, false);
   } catch (error) {
     refreshBusy = false;
     updateRefreshControl();
@@ -538,8 +565,16 @@ async function startBatchFromPanel(
 
 chrome.runtime.onMessage.addListener((message: unknown) => {
   if (message && typeof message === "object" && (message as { type?: unknown }).type === "RUN_UPDATED") {
-    void render();
+    if (notificationTimer !== null) return;
+    notificationTimer = window.setTimeout(() => {
+      notificationTimer = null;
+      void render().catch(showStateError);
+    }, 50);
   }
 });
 
-void render();
+function showStateError(error: unknown): void {
+  app.innerHTML = '<div class="error">' + escapeHtml(error instanceof Error ? error.message : error) + "</div>";
+}
+
+void render().catch(showStateError);

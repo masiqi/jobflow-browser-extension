@@ -22,6 +22,7 @@ const uuid = (index: number) => "00000000-0000-4000-8000-" + index.toString(16).
 const timestamp = (index: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString();
 let tables: Record<string, Row[]>;
 let serverCap: number;
+let responseBytes: number;
 
 function revision(index: number, opportunityIndex: number, text: string): Row {
   return {
@@ -46,6 +47,7 @@ beforeEach(() => {
   vi.resetModules();
   transport.fetch.mockReset();
   serverCap = 127;
+  responseBytes = 0;
   tables = {
     message_drafts: Array.from({ length: 620 }, (_, index) => ({
       user_id: ownerId, opportunity_id: uuid(index + 1), current_text: "Synthetic greeting " + (index + 1),
@@ -67,6 +69,10 @@ beforeEach(() => {
     for (const [field, value] of url.searchParams) {
       if (value.startsWith("eq.")) rows = rows.filter((row) => String(row[field]) === value.slice(3));
       if (value.startsWith("gt.")) rows = rows.filter((row) => String(row[field]) > value.slice(3));
+      if (value.startsWith("in.(")) {
+        const values = value.slice(4, -1).split(",").map((value) => value.replace(/^"|"$/g, ""));
+        rows = rows.filter((row) => values.includes(String(row[field])));
+      }
     }
     const ordering = url.searchParams.get("order");
     if (ordering) rows = [...rows].sort((left, right) => {
@@ -78,9 +84,172 @@ beforeEach(() => {
       return 0;
     });
     const limit = Math.min(serverCap, Number(url.searchParams.get("limit") ?? serverCap));
-    return new Response(JSON.stringify(rows.slice(0, limit)), {
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    rows = rows.slice(offset, offset + limit);
+    const select = url.searchParams.get("select");
+    if (select && select !== "*") rows = rows.map((row) => Object.fromEntries(select.split(",").map((key) => [key, row[key]!])));
+    const body = JSON.stringify(rows);
+    responseBytes += new TextEncoder().encode(body).byteLength;
+    return new Response(body, {
       status: 200, headers: { "Content-Type": "application/json" }
     });
+  });
+});
+
+describe("bounded egress reads", () => {
+  it.each([1000, 17, 1])("fills a summary page and detects the next page under server cap %s", async (cap) => {
+    serverCap = cap;
+    const { listOpportunityPage } = await import("../src/backend/supabase");
+    const first = await listOpportunityPage({ page: 0 });
+    expect(first.opportunities).toHaveLength(50);
+    expect(first.hasNext).toBe(true);
+    expect(first.opportunities[0]?.id).toBe(uuid(1250));
+    const second = await listOpportunityPage({ page: 1 });
+    expect(second.opportunities[0]?.id).toBe(uuid(1200));
+    const last = await listOpportunityPage({ page: 24 });
+    expect(last.opportunities).toHaveLength(50);
+    expect(last.hasNext).toBe(false);
+    expect((await listOpportunityPage({ page: 25 })).opportunities).toHaveLength(0);
+    for (const [input] of transport.fetch.mock.calls) {
+      const url = new URL(String(input));
+      expect(url.searchParams.get("order")).toBe("last_seen_at.desc,id.desc");
+      expect(url.searchParams.get("select")).not.toMatch(/description|card_text|recruiter|jd_hash/);
+    }
+  });
+
+  it("keeps response bytes and requests independent of historical JD volume", async () => {
+    const { listOpportunityPage } = await import("../src/backend/supabase");
+    const before = await listOpportunityPage({ page: 0 });
+    const bytes = responseBytes;
+    const requests = transport.fetch.mock.calls.length;
+    for (const row of tables.job_opportunities!) {
+      row.description = "Huge historical JD ".repeat(5000);
+      row.card_text = "Historical card ".repeat(2000);
+    }
+    tables.job_opportunities!.push(...Array.from({ length: 6000 }, (_, index) => ({
+      ...opportunity(index + 2000), last_seen_at: timestamp(0), description: "Huge unrelated JD ".repeat(5000)
+    })));
+    transport.fetch.mockClear();
+    responseBytes = 0;
+    const after = await listOpportunityPage({ page: 0, pageSize: 500 });
+    expect(after).toEqual(before);
+    expect(responseBytes).toBe(bytes);
+    expect(responseBytes).toBeLessThan(35_000);
+    expect(transport.fetch.mock.calls).toHaveLength(requests);
+    expect(after.opportunities[0]?.cardText).toBe("");
+    expect(after.opportunities[0]?.description).toBeUndefined();
+  });
+
+  it("quotes search operands and escapes literal percent, underscore, quotes and backslashes", async () => {
+    const { listOpportunityPage } = await import("../src/backend/supabase");
+    const search = 'agent%,_foo"\\),current_status.eq.draft_ready';
+    await listOpportunityPage({ page: 0, status: "user_excluded", search });
+    const url = new URL(String(transport.fetch.mock.calls[0]![0]));
+    const pattern = JSON.stringify('%agent\\%,\\_foo"\\\\),current\\_status.eq.draft\\_ready%');
+    expect(url.searchParams.get("or")).toBe("(title.ilike." + pattern + ",company.ilike." + pattern + ",platform_job_id.ilike." + pattern + ")");
+    expect(url.searchParams.get("current_status")).toBe("eq.user_excluded");
+  });
+
+  it("deduplicates only exact scanned platform IDs including very old exclusions under server caps", async () => {
+    serverCap = 1;
+    const { listCandidateIdentities } = await import("../src/backend/supabase");
+    const candidates = [1, 1250, 9000].map((id) => ({
+      platform: "liepin" as const, jobId: String(id), canonicalUrl: "https://www.liepin.com/job/" + id + ".shtml",
+      url: "https://www.liepin.com/job/" + id + ".shtml", index: id,
+      title: "Synthetic role", company: "Synthetic company", location: "", salary: "", experience: "", education: "", cardText: ""
+    }));
+    const result = await listCandidateIdentities(candidates);
+    expect(result).toEqual([
+      { id: uuid(1), platform: "liepin", platformJobId: "1", status: "user_excluded" },
+      { id: uuid(1250), platform: "liepin", platformJobId: "1250", status: "draft_ready" }
+    ]);
+    expect(responseBytes).toBeLessThan(400);
+    for (const [input] of transport.fetch.mock.calls) {
+      const url = new URL(String(input));
+      expect(url.searchParams.get("platform")).toBe("eq.liepin");
+      expect(url.searchParams.get("platform_job_id")).toBe("in.(1,1250,9000)");
+      expect(url.searchParams.get("select")).toBe("id,platform,platform_job_id,current_status");
+    }
+    transport.fetch.mockClear();
+    expect(await listCandidateIdentities([])).toEqual([]);
+    expect(transport.fetch).not.toHaveBeenCalled();
+  });
+
+  it("reads only the current revision even with thousands of historical revisions", async () => {
+    const { getCurrentDraft } = await import("../src/backend/supabase");
+    const initial = await getCurrentDraft(uuid(620));
+    const bytes = responseBytes;
+    expect(initial?.revisions.map((revision) => revision.id)).toEqual([uuid(1240)]);
+    tables.draft_revisions!.push(...Array.from({ length: 2000 }, (_, index) => ({
+      ...revision(index + 5000, 620, "Long old message".repeat(1000)), created_at: timestamp(0)
+    })));
+    transport.fetch.mockClear();
+    responseBytes = 0;
+    expect(await getCurrentDraft(uuid(620))).toEqual(initial);
+    expect(transport.fetch).toHaveBeenCalledTimes(2);
+    expect(responseBytes).toBe(bytes);
+    expect(responseBytes).toBeLessThan(1000);
+    for (const [input] of transport.fetch.mock.calls) {
+      const url = new URL(String(input));
+      expect(url.searchParams.get("opportunity_id")).toBe("eq." + uuid(620));
+      expect(url.searchParams.has("text")).toBe(false);
+      expect(url.searchParams.has("current_text")).toBe(false);
+    }
+    tables.draft_revisions!.push(revision(9000, 620, "Newer inconsistent revision"));
+    const stale = await getCurrentDraft(uuid(620));
+    expect(stale?.revisions.at(-1)?.text).not.toBe(stale?.currentText);
+  });
+
+  it("scopes full lookup by platform and job ID and respects RLS-hidden records", async () => {
+    const { getOpportunityByPlatform, getCurrentDraft } = await import("../src/backend/supabase");
+    expect(await getOpportunityByPlatform("liepin", "1")).toMatchObject({ id: uuid(1), description: "Synthetic description" });
+    expect(await getOpportunityByPlatform("zhaopin", "1")).toBeNull();
+    tables.job_opportunities![0]!.user_id = foreignOwnerId;
+    tables.message_drafts![0]!.user_id = foreignOwnerId;
+    expect(await getOpportunityByPlatform("liepin", "1")).toBeNull();
+    expect(await getCurrentDraft(uuid(1))).toBeNull();
+  });
+
+  it("never issues a global delivery query for an empty page and fills scoped capped results", async () => {
+    const { listDeliveryRecords } = await import("../src/backend/supabase");
+    expect(await listDeliveryRecords([])).toEqual([]);
+    expect(transport.fetch).not.toHaveBeenCalled();
+    tables.delivery_records = [1, 2, 3].map((id) => ({
+      user_id: ownerId, opportunity_id: uuid(id), platform: "liepin", platform_job_id: String(id),
+      resume_mode: "platform_default", overall_status: "succeeded", application_status: "verified", greeting_status: "verified",
+      draft_revision_id: uuid(id), draft_sha256: "synthetic", reservation_id: null, latest_reason: null, updated_at: timestamp(id)
+    }));
+    serverCap = 1;
+    expect((await listDeliveryRecords([uuid(1), uuid(3)])).map((record) => record.opportunityId)).toEqual([uuid(3), uuid(1)]);
+    for (const [input] of transport.fetch.mock.calls) {
+      const url = new URL(String(input));
+      expect(url.searchParams.get("opportunity_id")).toBe("in.(" + uuid(1) + "," + uuid(3) + ")");
+    }
+  });
+
+  it("paginates all selected-opportunity events and evaluations without unrelated history", async () => {
+    serverCap = 1;
+    tables.opportunity_events = [1, 2, 3].map((id) => ({
+      user_id: ownerId, id: uuid(id), opportunity_id: uuid(id === 2 ? 2 : 1),
+      kind: "opportunity_observed", schema_version: 1, actor: "system", payload: {}, created_at: timestamp(id)
+    }));
+    tables.evaluations = [1, 2, 3].map((id) => ({
+      user_id: ownerId, id: uuid(id), opportunity_id: uuid(id === 2 ? 2 : 1), outcome: "review", score: 50,
+      reasons: ["Synthetic reason"], jd_evidence: [], fact_ids: [], profile_id: uuid(1), rule_version: 1,
+      prompt_version: "v1", model_route: "byok", provider: "openai", model: "synthetic", created_at: timestamp(id)
+    }));
+    const { listEvaluations, listOpportunityEvents } = await import("../src/backend/supabase");
+    expect((await listOpportunityEvents(uuid(1))).map((event) => event.id)).toEqual([uuid(1), uuid(3)]);
+    expect((await listEvaluations(uuid(1))).map((evaluation) => evaluation.id)).toEqual([uuid(3), uuid(1)]);
+    for (const [input] of transport.fetch.mock.calls) expect(new URL(String(input)).searchParams.get("opportunity_id")).toBe("eq." + uuid(1));
+  });
+
+  it("projects scan observation RPC responses instead of returning existing JDs", async () => {
+    tables.observe_job_opportunities = [opportunity(1)];
+    const { upsertCandidates } = await import("../src/backend/supabase");
+    expect((await upsertCandidates([]))[0]).toMatchObject({ id: uuid(1), cardText: "" });
+    const url = new URL(String(transport.fetch.mock.calls[0]![0]));
+    expect(url.searchParams.get("select")).not.toMatch(/description|card_text|recruiter|jd_hash/);
   });
 });
 

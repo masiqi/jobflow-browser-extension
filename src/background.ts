@@ -5,13 +5,15 @@ import {
   deleteMyProductData,
   getAuthProjection,
   getDraft,
+  getCurrentDraft,
   getOpportunity,
+  getOpportunityByPlatform,
+  listOpportunityPage,
+  listCandidateIdentities,
   invokeModelGateway,
   loadActiveFilterConfig,
   listDeliveryRecords,
-  listDrafts,
   listEvaluations,
-  listOpportunities,
   listOpportunityEvents,
   listResumeProfiles,
   login,
@@ -20,7 +22,7 @@ import {
   register,
   recordJobDetails,
   prepareReviewedDelivery,
-  recordReviewedDeliveryAttempt,
+  recordReviewedDeliveryAttempt as persistReviewedDeliveryAttempt,
   releaseReviewedDeliveryQuota,
   reserveReviewedDeliveryQuota,
   saveDraftProfile,
@@ -28,6 +30,7 @@ import {
   updateDraftProfile,
   upsertCandidates
 } from "./backend/supabase";
+import { ViewCache } from "./backend/view-cache";
 import {
   DEFAULT_SETTINGS,
   LIEPIN_DETAIL_NAVIGATION_DELAY_MAX_SECONDS,
@@ -87,6 +90,7 @@ import {
 } from "./storage";
 import type {
   AppState,
+  AppStateQuery,
   BatchItem,
   BatchRun,
   DeliveryRecord,
@@ -131,6 +135,21 @@ const reviewedSendExecuting = new Set<string>();
 const reviewAndSendInFlight = new Set<string>();
 const userGenerationInFlight = new Set<string>();
 let liepinLiveWriteLockOwner: string | null = null;
+const viewCache = new ViewCache();
+
+function invalidateRecordViews(opportunityId?: string): void {
+  viewCache.invalidate("page:");
+  viewCache.invalidate("deliveries:");
+  viewCache.invalidate(opportunityId ? "detail:" + opportunityId : "detail:");
+}
+
+async function recordReviewedDeliveryAttempt(input: Parameters<typeof persistReviewedDeliveryAttempt>[0]): Promise<DeliveryRecord> {
+  try {
+    return await persistReviewedDeliveryAttempt(input);
+  } finally {
+    viewCache.invalidate("deliveries:");
+  }
+}
 
 function now(): string {
   return new Date().toISOString();
@@ -181,7 +200,8 @@ async function invokeModel(
       throw new Error("模型配置变更后需要重新连接测试");
     }
   }
-  return invokeModelGateway({
+  try {
+    return await invokeModelGateway({
     operation,
     requestId: crypto.randomUUID(),
     route: settings.model.route,
@@ -189,7 +209,13 @@ async function invokeModel(
     endpoint: settings.model.endpoint,
     model: settings.model.model || "managed",
     payload
-  }, byokKey || undefined);
+    }, byokKey || undefined);
+  } finally {
+    if (operation !== "test_provider") {
+      invalidateRecordViews(typeof payload.opportunityId === "string" ? payload.opportunityId : undefined);
+      if (operation === "extract_resume_profile") viewCache.invalidate("profiles");
+    }
+  }
 }
 
 async function activeProfile(): Promise<ResumeProfile | null> {
@@ -205,8 +231,9 @@ async function getLocalResumeState(profile: ResumeProfile | null, userId?: strin
   return metadata.sourceHash === profile.sourceHash ? "available" as const : "version_mismatch" as const;
 }
 
-async function getAppState(): Promise<AppState> {
-  const auth = await getAuthProjection();
+async function getAppState(query: AppStateQuery = {}, retry = true): Promise<AppState> {
+  const auth = await getAuthProjection({ cached: !query.refresh });
+  viewCache.setOwner(auth.userId ?? "");
   if (auth.status !== "signed_in" || !auth.userId) {
     return {
       auth,
@@ -224,37 +251,78 @@ async function getAppState(): Promise<AppState> {
     };
   }
   await ensureDeviceOwner(auth.userId);
+  if (query.refresh) viewCache.invalidate();
+  const version = viewCache.version;
   let settings = await loadSettings();
-  const cloudRules = await loadActiveFilterConfig();
+  const cloudRules = await viewCache.read("rules", loadActiveFilterConfig);
   if (cloudRules) {
     settings = { ...settings, rules: cloudRules };
-    await saveSettings(settings);
   }
-  const [profiles, opportunities, evaluations, events, drafts, deliveries] = await Promise.all([
-    listResumeProfiles(),
-    listOpportunities(),
-    listEvaluations(),
-    listOpportunityEvents(),
-    listDrafts(),
-    listDeliveryRecords()
-  ]);
-  const profile = profiles.find((item) => item.state === "draft")
-    ?? profiles.find((item) => item.state === "active")
-    ?? null;
-  return {
+  const state: AppState = {
     auth,
     settings,
-    resumeProfile: profile,
-    resumeProfiles: profiles,
-    localResumeState: await getLocalResumeState(profile, auth.userId),
+    resumeProfile: null,
+    resumeProfiles: [],
+    localResumeState: "missing",
     scanPreview: await getScanPreview(),
     run: await getRun(),
-    opportunities,
-    evaluations,
-    events,
-    drafts,
-    deliveries
+    opportunities: [], evaluations: [], events: [], drafts: [], deliveries: []
   };
+  const view = query.view ?? "sidepanel";
+  if (view === "resume") {
+    state.resumeProfiles = await viewCache.read("profiles", listResumeProfiles);
+    state.resumeProfile = state.resumeProfiles.find((p) => p.state === "draft")
+      ?? state.resumeProfiles.find((p) => p.state === "active") ?? null;
+    state.localResumeState = await getLocalResumeState(state.resumeProfile, auth.userId);
+  }
+  if (view === "sidepanel" || view === "records") {
+    const page = view === "sidepanel" ? 0 : query.page ?? 0;
+    const status = view === "records" && query.recordFilter !== "all" ? query.recordFilter : undefined;
+    const search = view === "records" ? query.recordSearch?.trim() : undefined;
+    const pageSize = view === "sidepanel" ? 8 : 50;
+    const pageResult = await viewCache.read("page:" + JSON.stringify([page, status, search, pageSize]),
+      () => listOpportunityPage({ page, status, search, pageSize }));
+    state.opportunities = pageResult.opportunities;
+    if (view === "records") {
+      state.recordPage = { page, hasNext: pageResult.hasNext };
+      const id = query.opportunityId ?? pageResult.opportunities[0]?.id;
+      state.recordDetail = null;
+      if (id) {
+        const detail = await viewCache.read("detail:" + id, async () => {
+          const opportunity = await getOpportunity(id);
+          if (!opportunity) return null;
+          const [draft, evaluations, events] = await Promise.all([
+            getDraft(id), listEvaluations(id), listOpportunityEvents(id)
+          ]);
+          return { opportunity, draft, evaluations, events };
+        });
+        if (detail) {
+          state.recordDetail = detail.opportunity;
+          state.drafts = detail.draft ? [detail.draft] : [];
+          state.evaluations = detail.evaluations;
+          state.events = detail.events;
+          if (detail.evaluations.length) state.resumeProfiles = await viewCache.read("profiles", listResumeProfiles);
+        }
+      }
+    }
+    const lastPartialId = view === "sidepanel" ? state.run?.items.slice(0, state.run.currentIndex)
+      .reverse().find((item) => item.status === "delivery_partial" && item.opportunityId)?.opportunityId : undefined;
+    const ids = [...new Set([...state.opportunities.map((o) => o.id),
+      ...(state.recordDetail ? [state.recordDetail.id] : []),
+      ...(lastPartialId ? [lastPartialId] : []),
+      ...(view === "sidepanel" && state.run?.items[state.run.currentIndex]?.opportunityId
+        ? [state.run.items[state.run.currentIndex]!.opportunityId!] : [])])].sort();
+    if (ids.length) state.deliveries = await viewCache.read("deliveries:" + ids.join(","), () => listDeliveryRecords(ids));
+  }
+  // A logout/account switch or concurrent write cannot publish an old snapshot.
+  const latestAuth = await getAuthProjection({ cached: true });
+  if (latestAuth.userId !== auth.userId || latestAuth.status !== "signed_in") {
+    viewCache.setOwner(latestAuth.userId ?? "");
+    if (retry) return getAppState({ ...query, refresh: false }, false);
+    throw new Error("登录账号已变化，请刷新页面");
+  }
+  if (version !== viewCache.version && retry) return getAppState({ ...query, refresh: false }, false);
+  return state;
 }
 
 async function openSidePanel(sender: chrome.runtime.MessageSender): Promise<void> {
@@ -296,9 +364,10 @@ async function scanCurrentTab(): Promise<ScanPreview> {
   if (result.candidates.some((candidate) => candidate.platform !== platform)) {
     throw new Error("职位列表来源与当前招聘平台不匹配");
   }
-  const existing = await listOpportunities();
+  const existing = await listCandidateIdentities(result.candidates);
   const existingByKey = new Map(existing.map((item) => [item.platform + ":" + item.platformJobId, item]));
   const stored = await upsertCandidates(result.candidates);
+  invalidateRecordViews();
   const processable = result.candidates.filter((candidate) => {
     const prior = existingByKey.get(jobKey(candidate));
     return !prior || prior.status === "discovered" || prior.status === "failed";
@@ -660,9 +729,7 @@ async function finishItem(
   await waitForMinimumDetailDwell(item);
   await closeItemTab(item);
   if (status === "failed" && error) {
-    const record = (await listOpportunities().catch(() => []))
-      .find((candidate) => candidate.platform === item.candidate.platform
-        && candidate.platformJobId === item.candidate.jobId);
+    const record = await getOpportunityByPlatform(item.candidate.platform, item.candidate.jobId).catch(() => null);
     if (record) {
       await persistProcessingFailure(record.id, error);
     }
@@ -694,11 +761,7 @@ async function processNext(): Promise<void> {
     return processAutomaticDelivery(run, item);
   }
   if (item.status !== "queued" && item.status !== "waiting_navigation") return;
-  const records = await listOpportunities();
-  const record = records.find((candidate) =>
-    candidate.platform === item.candidate.platform
-    && candidate.platformJobId === item.candidate.jobId
-  );
+  const record = await getOpportunityByPlatform(item.candidate.platform, item.candidate.jobId);
   if (!record) return finishItem(run, item, "failed", "职位记录不存在");
   const hasAutomaticDraftIdentity = run.executionPolicy === "automatic_send"
     && Boolean(item.opportunityId && item.draftRevisionId && item.draftSha256);
@@ -808,12 +871,10 @@ async function processAutomaticDelivery(run: BatchRun, item: BatchItem): Promise
     if (error instanceof DeliveryControlStoppedError) return;
     throw error;
   }
-  const opportunity = (await listOpportunities()).find((record) =>
-    record.id === item.opportunityId
-    && record.platform === item.candidate.platform
-    && record.platformJobId === item.candidate.jobId
-  );
-  if (!opportunity || !["draft_ready", "extracting"].includes(opportunity.status)) {
+  const opportunity = await getOpportunity(item.opportunityId);
+  if (!opportunity || opportunity.platform !== item.candidate.platform
+    || opportunity.platformJobId !== item.candidate.jobId
+    || !["draft_ready", "extracting"].includes(opportunity.status)) {
     await pauseAutomaticRunBeforeWrite(run, "opportunity_not_ready", "职位状态已变化，自动投递授权失效");
     return;
   }
@@ -898,10 +959,6 @@ async function processAutomaticDelivery(run: BatchRun, item: BatchItem): Promise
   }
 }
 
-function opportunityForJob(records: OpportunityRecord[], job: DetailJob): OpportunityRecord | undefined {
-  return records.find((item) => item.platform === job.platform && item.platformJobId === job.jobId);
-}
-
 async function processPostDetail(
   opportunityId: string,
   job: DetailJob,
@@ -909,7 +966,10 @@ async function processPostDetail(
   profile: ResumeProfile,
   onStage: (stage: PostDetailStage) => Promise<void> = async () => undefined
 ): Promise<PostDetailResult> {
-  const filter = evaluateRules(job, settings.rules);
+  // Display reads never persist another account's settings. Processing loads
+  // its authoritative small rule configuration independently of UI lifecycle.
+  const cloudRules = await loadActiveFilterConfig();
+  const filter = evaluateRules(job, cloudRules ?? settings.rules);
   if (filter.outcome !== "pass") {
     await invokeModel("record_filter", {
       opportunityId,
@@ -957,8 +1017,7 @@ async function handleDetail(job: DetailJob, leaseId: string): Promise<void> {
   await chrome.alarms.clear(detailAlarmName(run.id, leaseId));
   item.status = "extracting";
   await saveRun(run);
-  const records = await listOpportunities();
-  const opportunity = opportunityForJob(records, job);
+  const opportunity = await getOpportunityByPlatform(job.platform, job.jobId);
   if (!opportunity) return finishItem(run, item, "failed", "职位记录不存在");
 
   try {
@@ -981,6 +1040,7 @@ async function handleDetail(job: DetailJob, leaseId: string): Promise<void> {
       return;
     }
     await recordJobDetails(opportunity.id, crypto.randomUUID(), job, await sourceHash(job.description));
+    invalidateRecordViews(opportunity.id);
     const settings = await loadSettings();
     const profile = await activeProfile();
     if (!profile) return finishItem(run, item, "review_required", "已启用画像不存在");
@@ -1136,6 +1196,7 @@ async function importResume(request: Extract<RuntimeRequest, { type: "IMPORT_RES
     version: profiles.length + 1
   });
   const savedId = await saveDraftProfile(profile);
+  viewCache.invalidate("profiles");
   return (await listResumeProfiles()).find((item) => item.id === savedId) ?? profile;
 }
 
@@ -1186,7 +1247,7 @@ async function requireRetryModelReady(
 async function retryStoredOpportunity(opportunityId: string): Promise<PostDetailResult> {
   const auth = await getAuthProjection();
   if (auth.status !== "signed_in" || !auth.userId) throw new Error("请先登录");
-  const opportunity = (await listOpportunities()).find((item) => item.id === opportunityId);
+  const opportunity = await getOpportunity(opportunityId);
   if (!opportunity || opportunity.userId !== auth.userId) throw new Error("职位记录不存在或不属于当前账号");
   if (opportunity.status !== "failed") throw new Error("只有处理失败的职位可以重试");
   if (!opportunity.description?.trim()) throw new Error("职位详情不可用，无法从已保存记录重试");
@@ -1238,12 +1299,12 @@ async function runUserGenerationOnce<T>(opportunityId: string, operation: () => 
 function currentDraftRevision(draft: { currentText: string; revisions: Array<{ id: string; text: string; createdAt: string }> }): { id: string; text: string } | null {
   const matching = draft.revisions
     .filter((revision) => revision.text === draft.currentText)
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))[0];
   return matching ? { id: matching.id, text: matching.text } : null;
 }
 
 async function loadCurrentDraftIdentity(opportunityId: string): Promise<{ draftText: string; draftRevisionId: string; draftSha256: string }> {
-  const draft = await getDraft(opportunityId);
+  const draft = await getCurrentDraft(opportunityId);
   const revision = draft ? currentDraftRevision(draft) : null;
   if (!draft || !revision) throw new Error("当前草稿修订不存在");
   return {
@@ -1260,7 +1321,7 @@ async function loadReviewedSendIdentity(
 ): Promise<{ opportunity: OpportunityRecord; draftText: string; delivery: DeliveryRecord }> {
   const auth = await getAuthProjection();
   if (auth.status !== "signed_in" || !auth.userId) throw new Error("请先登录");
-  const [opportunity, draft] = await Promise.all([getOpportunity(opportunityId), getDraft(opportunityId)]);
+  const [opportunity, draft] = await Promise.all([getOpportunity(opportunityId), getCurrentDraft(opportunityId)]);
   if (!opportunity || opportunity.userId !== auth.userId) throw new Error("职位记录不存在或不属于当前账号");
   if (opportunity.platform !== "liepin") throw new Error("当前只支持猎聘职位");
   if (opportunity.status !== "draft_ready") throw new Error("只有已审核草稿可以投递并打招呼");
@@ -1865,7 +1926,7 @@ async function reviewAndSend(sender: chrome.runtime.MessageSender, opportunityId
           && item.candidate.jobId === opportunity.platformJobId)) {
         throw new Error("该职位仍在批次中，请先结束该批次");
       }
-      if ((await listDeliveryRecords()).some((item) => item.opportunityId === opportunityId)) {
+      if ((await listDeliveryRecords([opportunityId])).some((item) => item.opportunityId === opportunityId)) {
         throw new Error("该职位已有投递记录，请在人工发送区核对后处理");
       }
       const progress = async (stage: "generating" | "preflighting" | "sending") => {
@@ -1905,10 +1966,12 @@ async function handleReviewDecision(
 ): Promise<void> {
   if (decision === "permanently_exclude") {
     await appendUserEvent(opportunityId, "user_excluded", { reason: "用户在复核中永久排除" });
+    invalidateRecordViews(opportunityId);
+    await notifyState();
     return;
   }
   await runUserGenerationOnce(opportunityId, async () => {
-    const evaluations = await listEvaluations();
+    const evaluations = await listEvaluations(opportunityId);
     if (!evaluations.some((evaluation) => evaluation.opportunityId === opportunityId)) {
       const settings = await loadSettings();
       const { profile, job } = await findOpportunityAndProfile(opportunityId);
@@ -1933,8 +1996,8 @@ async function handleRequest(
   request: RuntimeRequest,
   sender: chrome.runtime.MessageSender
 ): Promise<unknown> {
-  if ("opportunityId" in request && reviewAndSendInFlight.has(request.opportunityId)
-    && request.type !== "REVIEW_AND_SEND_PROGRESS") {
+  if ("opportunityId" in request && request.opportunityId && reviewAndSendInFlight.has(request.opportunityId)
+    && request.type !== "REVIEW_AND_SEND_PROGRESS" && request.type !== "GET_APP_STATE") {
     throw new Error("该职位投递流程正在执行，请稍候");
   }
   switch (request.type) {
@@ -1957,7 +2020,7 @@ async function handleRequest(
       await cancelBatch();
       return undefined;
     case "GET_APP_STATE":
-      return getAppState();
+      return getAppState(request);
     case "UPDATE_SETTINGS": {
       const prior = await loadSettings();
       request.settings.model.endpoint = normalizeChatCompletionsEndpoint(request.settings.model.endpoint);
@@ -1976,21 +2039,25 @@ async function handleRequest(
         const activeRules = await loadActiveFilterConfig();
         if (JSON.stringify(activeRules) !== JSON.stringify(request.settings.rules)) {
           await saveFilterConfig(request.settings.rules);
+          viewCache.invalidate("rules");
         }
       }
       return saveSettings(request.settings);
     }
     case "AUTH_REGISTER": {
+      viewCache.setOwner("");
       const auth = await register(request.email, request.password);
       if (auth.userId) await ensureDeviceOwner(auth.userId);
       return auth;
     }
     case "AUTH_LOGIN": {
+      viewCache.setOwner("");
       const auth = await login(request.email, request.password);
       if (auth.userId) await ensureDeviceOwner(auth.userId);
       return auth;
     }
     case "AUTH_LOGOUT":
+      viewCache.setOwner("");
       await cancelBatch();
       await logout();
       await clearDeviceOwner();
@@ -2011,9 +2078,11 @@ async function handleRequest(
       return importResume(request);
     case "SAVE_PROFILE":
       await updateDraftProfile(request.profile);
+      viewCache.invalidate("profiles");
       return undefined;
     case "ACTIVATE_PROFILE":
       await activateProfile(request.profileId);
+      viewCache.invalidate("profiles");
       return undefined;
     case "DETAIL_PAGE_READY":
       return handleDetailPageReady(sender, request.jobId);
@@ -2078,6 +2147,7 @@ async function handleRequest(
       const auth = await getAuthProjection();
       if (auth.status !== "signed_in" || !auth.userId) throw new Error("请先登录");
       await deleteMyProductData();
+      viewCache.invalidate();
       await deleteUserResumes(auth.userId);
       await clearDeviceOwner();
       await ensureDeviceOwner(auth.userId);

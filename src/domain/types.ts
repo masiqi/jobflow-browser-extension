@@ -362,6 +362,17 @@ export interface ScanPreview {
   selectedJobIds: string[];
 }
 
+export type AppStateView = "sidepanel" | "records" | "resume" | "rules" | "model" | "account";
+
+export interface AppStateQuery {
+  view?: AppStateView;
+  page?: number;
+  recordFilter?: OpportunityStatus | "all";
+  recordSearch?: string;
+  opportunityId?: string;
+  refresh?: boolean;
+}
+
 export interface AppState {
   auth: AuthProjection;
   settings: ExtensionSettings;
@@ -375,4 +386,6 @@ export interface AppState {
   events: OpportunityEvent[];
   drafts: MessageDraft[];
   deliveries: DeliveryRecord[];
+  recordPage?: { page: number; hasNext: boolean };
+  recordDetail?: OpportunityRecord | null;
 }

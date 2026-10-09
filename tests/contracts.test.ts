@@ -12,6 +12,14 @@ import {
 import { normalizeChatCompletionsEndpoint } from "../src/llm";
 
 describe("runtime and endpoint contracts", () => {
+  it("bounds scoped state reads and rejects arbitrary query instructions", () => {
+    expect(decodeRuntimeRequest({ type: "GET_APP_STATE", view: "records", page: 2,
+      recordFilter: "review_required", recordSearch: "平台", refresh: true })).toMatchObject({ view: "records", page: 2 });
+    for (const fields of [{ page: -1 }, { page: 1.5 }, { page: 100001 }, { recordSearch: "a".repeat(101) },
+      { view: "everything" }, { opportunityId: "wrong" }, { select: "*" }, { recordFilter: "anything" }]) {
+      expect(() => decodeRuntimeRequest({ type: "GET_APP_STATE", ...fields })).toThrow();
+    }
+  });
   it("binds one-click reviewed sending only to an opportunity UUID", () => {
     const request = { type: "REVIEW_AND_SEND", opportunityId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" };
     expect(decodeRuntimeRequest(request)).toEqual(request);
@@ -57,7 +65,7 @@ describe("runtime and endpoint contracts", () => {
     expect(persistDetails).toBeGreaterThan(clearAlarm);
     expect(persistDetails).toBeLessThan(handler.indexOf("await activeProfile()"));
     expect(continueProcessing).toBeGreaterThan(persistDetails);
-    expect(postDetail).toContain("evaluateRules(job, settings.rules)");
+    expect(postDetail).toContain("evaluateRules(job, cloudRules ?? settings.rules)");
     expect(postDetail).toContain('invokeModel("evaluate_opportunity"');
     expect(postDetail).not.toContain("chrome.tabs");
   });

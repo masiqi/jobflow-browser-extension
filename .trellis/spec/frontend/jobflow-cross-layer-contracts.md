@@ -668,3 +668,77 @@ preflight, final identity checks, stage feedback and re-render persistence.
 Wrong: watch all draft_ready rows and send whenever account policy allows it.
 Correct: one explicit REVIEW_AND_SEND authorizes only the selected opportunity;
 background binds the validated persisted revision and finishes or stops once.
+
+## Scenario: Bounded display reads and Supabase egress (2026-10-09)
+
+### 1. Scope / Trigger
+
+Use this contract for all GET_APP_STATE, UI rendering, scan deduplication and queue
+reads. Full-history helpers remain for explicit maintenance/tests, not hot paths.
+
+### 2. Signatures
+
+~~~typescript
+{ type: "GET_APP_STATE", view?: "sidepanel" | "records" | "resume" | "rules" | "model" | "account",
+  page?: number, recordFilter?: OpportunityStatus | "all", recordSearch?: string,
+  opportunityId?: string, refresh?: boolean }
+// AppState: opportunities = summaries; recordDetail = exact selected record.
+// recordPage = { page, hasNext }; drafts/evaluations/events = selected target only.
+listOpportunityPage({ page, status?, search?, pageSize? })
+listCandidateIdentities(candidates)
+getOpportunityByPlatform(platform, jobId)
+getCurrentDraft(opportunityId)
+getAuthProjection({ cached?: boolean })
+~~~
+
+### 3. Contracts
+
+- Default view is sidepanel: eight summaries and scoped deliveries, never JD or
+  draft/evaluation/event history. Include current item and prior partial item when
+  needed to render authoritative recovery state.
+- Records are at most 50 summaries per page, stable last_seen_at/id ordering and
+  server-side filtering/search. Exact selected detail loads only that job's data.
+- Resume view loads profiles; account/model/rules views load no record collections.
+- ViewCache is owner-scoped, holds at most 100 entries, coalesces in-flight reads,
+  and expires 30 seconds after completion. Mutation invalidates affected entries;
+  explicit refresh bypasses it. Errors are not cached. Late requests cannot replace
+  fresh entries. Final auth checking prevents returning a previous owner's data.
+- Display reads never persist settings. Processing reads cloud rules independently
+  of whether any UI was opened, without overwriting another owner's device policy.
+- Authoritative send reads never use display caches: current draft and newest
+  revision are bounded exact queries, checked again by the existing RPC. Newest
+  revision ties use created_at desc, id desc consistently in UI and background.
+- Scan queries only the current candidate identities/statuses, including older
+  exclusions. Queue and retries fetch exact targets. No global history per item.
+- Progress/countdown updates are local. Side-panel bursts and duplicate UI reads
+  coalesce; response generation/version guards prevent stale rendering.
+
+### 4. Validation & Error Matrix
+
+| Case | Expected |
+| --- | --- |
+| Invalid view/page/filter/UUID, search over 100 chars or extra query instruction | Runtime schema rejects |
+| Dataset grows to thousands of JDs | Summary bytes/request counts remain page-bounded |
+| Target has thousands of old revisions | Send reads current text plus newest revision only |
+| Any page fails | Visible error, no partial authoritative result |
+| Account switches during cached read | Old data/settings never returned or persisted to new owner |
+| Sending while display data is cached | Fresh identity/policy/quota checks still required |
+
+### 5. Good/Base/Bad Cases
+
+Good: 100 stage snapshots reuse eight cached summaries while displaying current
+local batch stages. Base: a selected JD is read once and refreshed on mutation.
+Bad: render progress by reloading all job descriptions and draft revisions.
+
+### 6. Tests Required
+
+backend-history/backend-auth-cache test query scopes, row caps, response byte
+budgets, session isolation and current revision bounds. app-state-egress/view-cache
+test coalescing, invalidation, auth races and view-specific query counts. Options
+and side-panel tests enforce pagination, selected detail and local-only progress.
+
+### 7. Wrong vs Correct
+
+Wrong: listOpportunities().find(...) in every queue step or Promise.all of every
+history table in GET_APP_STATE. Correct: exact target getters for processing,
+bounded summary pages for display, selected detail on demand and display-only cache.
