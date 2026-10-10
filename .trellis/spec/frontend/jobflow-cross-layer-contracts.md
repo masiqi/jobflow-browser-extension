@@ -28,6 +28,9 @@ parseSuitabilityDecision(raw: unknown, job: DetailJob, profile: ResumeProfile): 
 parseGreetingDecision(raw: unknown, job: DetailJob, profile: ResumeProfile): GreetingDecision
 isLiepinListPage(location: Location): boolean
 scanLiepinList(root: ParentNode): ListCandidate[]
+getOpportunity(opportunityId: string): Promise<OpportunityRecord | null>
+getDraft(opportunityId: string): Promise<MessageDraft | null>
+listDrafts(): Promise<MessageDraft[]>
 ~~~
 
 Stored-detail retry runtime command:
@@ -140,8 +143,11 @@ Runtime requests:
 - Decode unknown once in src/domain/messages.ts.
 - Use a discriminated type field.
 - Reject unknown fields with strict Zod objects.
-- Live behavior exists only in strict reviewed-send prepare/confirm commands or in a side-panel `automatic_send` batch whose selected IDs and execution policy were explicitly authorized at start. Page-load, scan, settings save, startup, scroll, pagination, upload, and free-form platform commands cannot write to Liepin.
+- Live behavior exists only in strict reviewed-send prepare/confirm commands, explicit options-page `REVIEW_AND_SEND`, or in a side-panel `automatic_send` batch whose selected IDs and execution policy were explicitly authorized at start. Page-load, scan, settings save, startup, scroll, pagination, upload, and free-form platform commands cannot write to Liepin.
 - Content scan returns sourceUrl plus at most 500 decoded list candidates.
+- Side-panel platform and next-start wording use a batch's platform only while
+  it is queued, running or paused. Completed/cancelled/failed historical batches
+  must not override the current scan's platform or hide real-write wording.
 - A batch accepts 1 through 500 selected platform job IDs from the current scan snapshot. There is no separate per-batch selection limit below that structural cap. Batch start is accepted only from the exact extension side panel URL, must include the expected execution policy, must match trusted settings, and must fail if another queued/running/paused run already exists.
 - Stored-detail retry accepts only an opportunity UUID. JD text, profile data, model credentials, and status cannot be supplied by the page command.
 - Detail-page lease handshake accepts only a platform job ID from a trusted Liepin content sender. It returns the current extension-owned item lease only when sender tab ID, sender URL, current batch item, current job ID, item status, and run status match. It returns no lease for user-opened details, options/sidepanel callers, wrong tabs/jobs, historical items, completed/cancelled runs, or non-Liepin origins.
@@ -156,6 +162,14 @@ Opportunity identity:
 - The database key is user_id + platform + platform_job_id.
 - No URL, title, company, recruiter, hash, or similarity participates.
 - Processing RPCs verify that job.platform and job.jobId match the owned record.
+- A send target and its current draft identity must be fetched by exact owned
+  opportunity ID. A capped history list is not authoritative evidence that a
+  draft or opportunity is absent. Revisions must match the current draft text;
+  never fabricate a revision or weaken the hash check to work around truncation.
+- Full opportunity/draft/revision collections page by immutable unique UUID key
+  (`id` or `opportunity_id`) and continue until an empty result. Preserve UI sort
+  order after retrieval. A server response cap may be lower than the requested
+  page size; page errors or a non-advancing cursor must fail the whole read.
 
 State:
 
@@ -355,6 +369,9 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 | PREPARE succeeds | Persist awaiting_confirmation; consume no daily unit and perform no Liepin click/fill |
 | Final preflight differs or fails | Stop before write; release any unused reservation |
 | Content lease/hash differs | Reject without platform interaction |
+| More than 500 drafts / more than the API row cap | Exact send lookup still finds the current owned draft; history pagination does not omit it |
+| A history page is shorter than requested due to server cap | Continue by stable cursor until an empty page; do not assume completion |
+| Any history page fails or is malformed | Reject the read; do not return a partial history as authoritative data |
 | `聊一聊` sends a platform default greeting | Record application/contact attempt only; do not treat it as the reviewed custom greeting |
 | Liepin IM bundle appears between 4 and 15 seconds after `聊一聊` | Continue bounded discovery, then bind only a unique chat-local surface |
 | One visible `.im-ui-chat-input` contains one `.im-ui-textarea` and one `.im-ui-basic-send-btn` | Use that exact surface even when the send control is not a `button`/`a` or the surface contains another text input |
@@ -386,6 +403,10 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 - Good: user A scans job 123, Edge reloads user A active profile through RLS, stores one evaluation and one evidence-backed draft, and user B sees none of it.
 - Base: a signed-out/default build renders account setup but cannot start backend or reviewed-send work.
 - Good: the same platform job ID appears on another page; metadata updates and no model call repeats.
+- Good: a newly generated 501st draft has its current revision fetched by exact
+  opportunity ID; existing older excluded jobs remain visible to deduplication.
+- Bad: infer “current revision missing” from a global first-500 draft window, or
+  assume that increasing limit bypasses the hosted API's own row cap.
 - Good: a model-excluded record receives a user_override event and generation-only processing while the original exclusion stays visible.
 - Good: resume import immediately shows local parsing/storage/model stages and prevents a second import until completion.
 - Good: the user explicitly scans `c.liepin.com/`; already-rendered job cards are extracted without operating the page.
@@ -436,6 +457,9 @@ The build accepts only one exact supabase.co origin or http://127.0.0.1:54321 an
 For every contract change, update the nearest focused test and rerun the full gates:
 
 - tests/contracts.test.ts: RuntimeRequest and build/Endpoint schemas.
+- Backend read regressions must exercise more than 500 drafts, more than 1000
+  revisions, and a smaller simulated server row cap; verify complete histories,
+  exact target queries, missing/mismatched revision rejection and page errors.
 - tests/storage.test.ts: device owner, BYOK isolation, malformed persisted data.
 - tests/batch-persistence.test.ts: accepted details keep the stored batch schema valid and terminal first-item outcomes advance to the next queued item.
 - tests/domain.test.ts and tests/batch.test.ts: exhaustive projections and transitions.
@@ -585,3 +609,139 @@ await waitForPageReady();
 element.focus({ preventScroll: true });
 element.click();
 ~~~
+
+## Scenario: One-click human review and delivery (2026-09-26)
+
+### 1. Scope / Trigger
+
+The options record center can combine generation, preflight and confirmed delivery
+for one pending-review Liepin record. The user explicitly approved this shortcut.
+
+### 2. Signatures
+
+~~~typescript
+{ type: "REVIEW_AND_SEND", opportunityId: string /* UUID */ }
+{ type: "REVIEW_AND_SEND_PROGRESS", opportunityId: string, ownerId: string,
+  stage: "generating" | "preflighting" | "sending" }
+~~~
+
+### 3. Contracts
+
+- Accept only the exact trusted options page, signed-in owner, pending-review
+  Liepin record and a policy that allows writes.
+- Generate a validated greeting directly from the stored JD and active approved
+  profile. Human approval does not repeat model suitability evaluation; preserve
+  original rule/model history.
+- Bind the persisted draft revision and SHA-256 to existing prepare/confirm and
+  delivery primitives. Preserve manual evidence semantics, quota and write locks.
+- Guard the complete operation against duplicate generation/delivery and
+  conflicting record edits/exclusion. Recheck identity and policy before writing.
+- Display immediate busy acknowledgement and generation/preflight/delivery
+  stages across RUN_UPDATED and re-renders. Never start from rendering/reload.
+- Progress notifications are display-only, strictly decoded and matched to the
+  active opportunity/owner. Ignore notifications from content tabs. Keep the
+  selected record detail visible when its status leaves the current filter.
+- Zhaopin and draft-only mode retain generation-only actions.
+
+### 4. Validation & Error Matrix
+
+| Condition | Result |
+| --- | --- |
+| Content/side-panel sender, wrong owner/platform/state, draft-only policy | Reject before generation or platform actions |
+| Duplicate click/message or conflicting edit/exclude | Block concurrent work |
+| Invalid greeting or failed preflight | Stop; no live send |
+| Owner/policy/revision changed before write | Stop before live send |
+| Partial/unverified post-write result | Preserve component history; no automatic replay |
+
+### 5. Good/Base/Bad Cases
+
+- Good: a human-approved review generates one grounded greeting and runs one
+  job-bound delivery without a second modal.
+- Base: a draft-only or Zhaopin record only generates a draft.
+- Bad: schedule a send merely because the record became draft_ready.
+
+### 6. Tests Required
+
+Assert exact command decoding, accepted/rejected senders, ownership/platform/state
+and policy, duplicate/conflicting requests, no writes on failed generation or
+preflight, final identity checks, stage feedback and re-render persistence.
+
+### 7. Wrong vs Correct
+
+Wrong: watch all draft_ready rows and send whenever account policy allows it.
+Correct: one explicit REVIEW_AND_SEND authorizes only the selected opportunity;
+background binds the validated persisted revision and finishes or stops once.
+
+## Scenario: Bounded display reads and Supabase egress (2026-10-09)
+
+### 1. Scope / Trigger
+
+Use this contract for all GET_APP_STATE, UI rendering, scan deduplication and queue
+reads. Full-history helpers remain for explicit maintenance/tests, not hot paths.
+
+### 2. Signatures
+
+~~~typescript
+{ type: "GET_APP_STATE", view?: "sidepanel" | "records" | "resume" | "rules" | "model" | "account",
+  page?: number, recordFilter?: OpportunityStatus | "all", recordSearch?: string,
+  opportunityId?: string, refresh?: boolean }
+// AppState: opportunities = summaries; recordDetail = exact selected record.
+// recordPage = { page, hasNext }; drafts/evaluations/events = selected target only.
+listOpportunityPage({ page, status?, search?, pageSize? })
+listCandidateIdentities(candidates)
+getOpportunityByPlatform(platform, jobId)
+getCurrentDraft(opportunityId)
+getAuthProjection({ cached?: boolean })
+~~~
+
+### 3. Contracts
+
+- Default view is sidepanel: eight summaries and scoped deliveries, never JD or
+  draft/evaluation/event history. Include current item and prior partial item when
+  needed to render authoritative recovery state.
+- Records are at most 50 summaries per page, stable last_seen_at/id ordering and
+  server-side filtering/search. Exact selected detail loads only that job's data.
+- Resume view loads profiles; account/model/rules views load no record collections.
+- ViewCache is owner-scoped, holds at most 100 entries, coalesces in-flight reads,
+  and expires 30 seconds after completion. Mutation invalidates affected entries;
+  explicit refresh bypasses it. Errors are not cached. Late requests cannot replace
+  fresh entries. Final auth checking prevents returning a previous owner's data.
+- Display reads never persist settings. Processing reads cloud rules independently
+  of whether any UI was opened, without overwriting another owner's device policy.
+- Authoritative send reads never use display caches: current draft and newest
+  revision are bounded exact queries, checked again by the existing RPC. Newest
+  revision ties use created_at desc, id desc consistently in UI and background.
+- Scan queries only the current candidate identities/statuses, including older
+  exclusions. Queue and retries fetch exact targets. No global history per item.
+- Progress/countdown updates are local. Side-panel bursts and duplicate UI reads
+  coalesce; response generation/version guards prevent stale rendering.
+
+### 4. Validation & Error Matrix
+
+| Case | Expected |
+| --- | --- |
+| Invalid view/page/filter/UUID, search over 100 chars or extra query instruction | Runtime schema rejects |
+| Dataset grows to thousands of JDs | Summary bytes/request counts remain page-bounded |
+| Target has thousands of old revisions | Send reads current text plus newest revision only |
+| Any page fails | Visible error, no partial authoritative result |
+| Account switches during cached read | Old data/settings never returned or persisted to new owner |
+| Sending while display data is cached | Fresh identity/policy/quota checks still required |
+
+### 5. Good/Base/Bad Cases
+
+Good: 100 stage snapshots reuse eight cached summaries while displaying current
+local batch stages. Base: a selected JD is read once and refreshed on mutation.
+Bad: render progress by reloading all job descriptions and draft revisions.
+
+### 6. Tests Required
+
+backend-history/backend-auth-cache test query scopes, row caps, response byte
+budgets, session isolation and current revision bounds. app-state-egress/view-cache
+test coalescing, invalidation, auth races and view-specific query counts. Options
+and side-panel tests enforce pagination, selected detail and local-only progress.
+
+### 7. Wrong vs Correct
+
+Wrong: listOpportunities().find(...) in every queue step or Promise.all of every
+history table in GET_APP_STATE. Correct: exact target getters for processing,
+bounded summary pages for display, selected detail on demand and display-only cache.

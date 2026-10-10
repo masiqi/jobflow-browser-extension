@@ -45,9 +45,12 @@ export function createBatchRun(
   const selected = new Set(selectedJobIds);
   const candidates = preview.candidates.filter((candidate) => selected.has(candidate.jobId));
   if (!candidates.length) throw new Error("请选择至少一个新职位");
+  if (new Set(candidates.map((candidate) => candidate.platform)).size !== 1) {
+    throw new Error("一个批次只能处理同一个招聘平台的职位");
+  }
   return {
     id,
-    platform: "liepin",
+    platform: candidates[0]!.platform,
     status: "running",
     sourceUrl: preview.sourceUrl,
     executionPolicy,

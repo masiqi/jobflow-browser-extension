@@ -1,4 +1,4 @@
-# JobFlow 猎聘草稿助手
+# JobFlow 求职草稿助手
 
 JobFlow 是一个 Chrome Manifest V3 扩展。用户先使用猎聘自带的搜索和筛选器完成粗筛，扩展读取当前页面已经加载的职位卡片，串行打开公开详情页，执行有限且可解释的 JD 规则与 LLM 适配度判断，生成可审核、可编辑、可追溯的招呼语草稿，并可按执行策略选择仅生成、逐条确认发送，或在一次明确授权的选中批次内自动投递并打招呼。
 
@@ -63,6 +63,15 @@ JobFlow 是一个 Chrome Manifest V3 扩展。用户先使用猎聘自带的搜�
 - 处理失败且已有完整 JD 的记录可直接在管理页重试，重试不会重新打开猎聘详情页；
 - 队列支持暂停、继续、取消和基于 chrome.alarms 的 MV3 恢复。
 
+### 智联招聘发现与筛选（首期只读）
+
+- 只识别智联招聘明确的职位列表路由和当前 DOM 中已经加载的职位卡；
+- 保留智联招聘完整平台职位 ID，使用平台 + 职位 ID 写入统一的职位历史；
+- 串行打开智联招聘公开详情页，保存职位描述和招聘方信息后复用相同的 JD 规则、画像、模型评估和招呼语草稿；
+- 智联招聘首期不执行投递、不点击沟通、不上传简历、不调用私有写 API；真实投递需要后续单独的适配器验收。
+- 智联详情读取失败会保存一段脱敏诊断（URL path、readyState、可见性、标题/描述 selector 数量、正文长度和登录/风控标志），不保存页面正文；content script Console 使用 `[JobFlow:zhaopin-detail-diagnostic]` 前缀，管理台职位记录会显示同一条有限长度原因。
+- 已保存详情的失败职位再次加入智联批次时会直接复用历史 JD 继续规则和模型处理，不重新打开招聘网站；需要查看或重试时可在管理台“职位记录”操作。
+
 ### JD 细筛
 
 用户只能通过结构化控件启用以下五类规则，不能填写任意自然语言、关键词或正则：
@@ -92,6 +101,7 @@ JobFlow 是一个 Chrome Manifest V3 扩展。用户先使用猎聘自带的搜�
 
 ### 人工确认投递并打招呼
 
+- 职位记录中的猎聘“待复核”项提供“生成并投递”：用户看完 JD 后点一次，插件生成并校验招呼语、自动打开职位详情页做预检，然后投递并发送；执行中显示阶段，遇到生成错误、验证码或发送条件不满足会停止并显示原因。仅生成模式和智联首期仍只生成草稿。
 - 只有 `draft_ready` 或可恢复的部分完成记录显示逐条发送入口；
 - 第一步“准备发送”只做职位、登录、控件和草稿身份预检，不点击猎聘、不占用额度；
 - 如果对应详情页尚未打开，“准备发送”会在后台自动打开并等待；如果扩展 Reload 使已有页面的 content context 失效，会自动刷新精确匹配的职位页一次；
@@ -127,6 +137,7 @@ JobFlow 是一个 Chrome Manifest V3 扩展。用户先使用猎聘自带的搜�
 
 ## 界面
 
+- 职位记录每页最多 50 条摘要，搜索和状态筛选在云端执行；选中职位后才读取对应 JD、草稿及历史。侧栏只读取最近 8 条摘要，进度与倒计时不会反复下载完整历史。展示缓存按账号隔离，发送前仍实时校验。详见 [流量与数据读取说明](docs/traffic-and-data-loading.md)。
 - 猎聘页面右侧显示一个 42px 的轻量入口；
 - 点击入口打开原生 Chrome side panel；
 - side panel 负责扫描、预览、批次控制、进度和最近记录；当前结果旁的“刷新状态”只重新读取扩展状态，不重新扫描页面；
@@ -149,7 +160,7 @@ JobFlow 是一个 Chrome Manifest V3 扩展。用户先使用猎聘自带的搜�
 以下约束是当前构建的硬边界：
 
 1. 页面打开、扫描、刷新、设置保存、Chrome 启动和历史草稿查看都不能触发 live 写入；
-2. 真实动作只来自管理台逐条 PREPARE/CONFIRM 或 side panel 显式授权的 `automatic_send` 当前批次；
+2. 真实动作只来自管理台逐条 PREPARE/CONFIRM、待复核职位的显式“生成并投递”，或 side panel 显式授权的 `automatic_send` 当前批次；
 3. 招聘站点点击和填写只允许出现在 job-bound reviewed-send 适配器中；
 4. 不向招聘站点上传新文件，只能使用猎聘已经选中的在线/附件简历；
 5. 不调用招聘站点私有写 API；
@@ -231,11 +242,11 @@ npm run smoke:extension
 
 ## 本地 Supabase
 
-启动并重放数据库：
+启动服务并应用尚未执行的迁移（保留已有数据）：
 
 ~~~bash
 supabase start
-supabase db reset
+supabase migration up --local
 supabase test db
 ~~~
 
@@ -245,13 +256,13 @@ supabase test db
 supabase functions serve model-gateway
 ~~~
 
-也可以使用一键本地启动脚本。它只重启当前仓库对应的 Supabase 项目，保留数据库数据卷，停止并重新启动当前目录下的 `model-gateway`，等待本地 API/Function 就绪，再用 `.env.local` 的公开 `PUBLISHABLE_KEY` 重建 `dist`：
+也可以使用一键本地启动脚本。它只重启当前仓库对应的 Supabase 项目，保留数据库数据卷，应用待执行的本地迁移，停止并重新启动当前目录下的 `model-gateway`，等待本地 API/Function 就绪，再用 `.env.local` 的公开 `PUBLISHABLE_KEY` 重建 `dist`：
 
 ~~~bash
 npm run start:local
 ~~~
 
-脚本不会执行 `supabase db reset`，不会使用 `--no-verify-jwt`，不会停止其他 Supabase 项目，也不会杀掉其他目录下的进程。`model-gateway` 的日志写入系统临时目录；如果要提供日志排错，只需提供其中的脱敏错误信息，不要提供 Key、Authorization、简历或职位正文。
+脚本不会执行 `supabase db reset`，不会删除本地账号、画像或职位记录；不会使用 `--no-verify-jwt`，不会停止其他 Supabase 项目，也不会杀掉其他目录下的进程。`model-gateway` 的日志写入系统临时目录；如果要提供日志排错，只需提供其中的脱敏错误信息，不要提供 Key、Authorization、简历或职位正文。
 
 Supabase CLI 会输出本地 API URL 和 PUBLISHABLE_KEY。不要把本地 SECRET_KEY、SERVICE_ROLE_KEY、JWT secret 或任何远程项目密钥写入源码、README、命令脚本、测试或 Git。
 
@@ -401,7 +412,14 @@ npm run smoke:extension
 
 ## 远程 Supabase
 
-本仓库没有连接、迁移或部署任何远程 Supabase 项目。远程操作会改变外部状态，必须先明确目标项目并单独执行：
+项目支持 Supabase Cloud，浏览器扩展通过构建时指定的项目 URL 和公开 Key 连接。
+部署数据库迁移与 `model-gateway` 后，无需额外启动应用后端。环境文件和连接信息
+保留在本机，Git 中的默认构建不绑定任何项目。首次部署时明确目标项目后执行：
+
+如果把 Supabase 自托管在局域网机器上，推荐保留扩展现有的精确本地 origin，通过 SSH
+隧道转发到远端独立端口，而不是把局域网 IP 加入扩展 host permissions。完整的远端
+运行目录、systemd 用户服务、端口模板、启动/停止和升级说明见
+[docs/remote-deployment.md](docs/remote-deployment.md)。
 
 ~~~text
 supabase login

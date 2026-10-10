@@ -1,5 +1,6 @@
 import { MODEL_PROVIDER_PRESETS, TECHNOLOGY_CATALOG } from "./defaults";
 import { projectRuleEvidence } from "./domain/events";
+import { reviewAndSendProgressSchema } from "./domain/messages";
 import { readPastedResume, readResumeFile } from "./pdf";
 import { sourceHash } from "./resume";
 import { deleteResume, storeResumeFile, storeResumeText } from "./local/resume-store";
@@ -12,6 +13,7 @@ import {
 } from "./ui/delivery";
 import type {
   AppState,
+  AppStateQuery,
   DeliveryRecord,
   ExtensionSettings,
   OpportunityRecord,
@@ -40,8 +42,12 @@ const app: HTMLDivElement = appElement;
 
 let currentView: ViewName = "records";
 let selectedOpportunityId = "";
-let recordFilter = "all";
+let recordFilter: AppStateQuery["recordFilter"] = "all";
 let recordSearch = "";
+let recordPage = 0;
+let renderVersion = 0;
+let displayedOwnerId: string | undefined;
+const pendingStateReads = new Map<string, Promise<AppState>>();
 let resumeImportBusy = false;
 let resumeImportFeedback: ResumeImportFeedback = { kind: "idle", message: "" };
 let storedRetryBusyOpportunityId = "";
@@ -49,6 +55,14 @@ let storedRetryFeedback: StoredRetryFeedback = { opportunityId: "", kind: "idle"
 let reviewedSendBusyOpportunityId = "";
 let reviewedSendPreparedOpportunityId = "";
 let reviewedSendFeedback: ReviewedSendFeedback = { opportunityId: "", kind: "idle", message: "" };
+let reviewAndSendBusy = false;
+let reviewAndSendOwnerId = "";
+let reviewAndSendFeedback: ReviewedSendFeedback = { opportunityId: "", kind: "idle", message: "" };
+const REVIEW_AND_SEND_STAGES = {
+  generating: "正在生成招呼语",
+  preflighting: "正在检查投递条件",
+  sending: "正在投递并发送"
+};
 
 const STATUS_LABELS: Record<string, string> = {
   discovered: "待处理",
@@ -71,7 +85,7 @@ const POLICY_LABELS: Record<ExtensionSettings["executionPolicy"], string> = {
 };
 
 const POLICY_STATUS: Record<ExtensionSettings["executionPolicy"], { title: string; note: string }> = {
-  draft_only: { title: "仅生成草稿", note: "当前禁止猎聘真实写入" },
+  draft_only: { title: "仅生成草稿", note: "当前禁止招聘网站真实写入" },
   reviewed_send: { title: "逐条确认发送", note: "仅管理台可执行真实写入" },
   automatic_send: { title: "选中批次自动投递", note: "仅侧边栏一键按钮授权本批" }
 };
@@ -141,7 +155,7 @@ function accountView(state: AppState): string {
     '<dt>邮箱认证</dt><dd>' + escapeHtml(state.auth.emailVerificationStatus) + '</dd>',
     '<dt>模型权益</dt><dd>' + (state.auth.vip ? "VIP 托管模型" : "BYOK") + '</dd></dl>',
     '<label class="check"><input id="launcherVisible" type="checkbox" ' + (state.settings.launcherVisible ? "checked" : "")
-      + '><span>在猎聘页面显示侧边栏入口</span></label>',
+      + '><span>在支持的招聘网站页面显示侧边栏入口</span></label>',
     '<fieldset class="segmented execution-policy"><legend>执行策略</legend>',
     (Object.entries(POLICY_LABELS) as Array<[ExtensionSettings["executionPolicy"], string]>).map(([value, label]) =>
       '<label><input type="radio" name="executionPolicy" value="' + value + '" '
@@ -281,13 +295,9 @@ function modelView(state: AppState): string {
 }
 
 function recordView(state: AppState): string {
-  const query = recordSearch.trim().toLowerCase();
-  const records = state.opportunities.filter((record) => {
-    const matchesStatus = recordFilter === "all" || record.status === recordFilter;
-    const matchesSearch = !query || (record.title + " " + record.company).toLowerCase().includes(query);
-    return matchesStatus && matchesSearch;
-  });
-  const selected = state.opportunities.find((record) => record.id === selectedOpportunityId) ?? records[0];
+  const records = state.opportunities;
+  const selected = state.recordDetail !== undefined ? state.recordDetail
+    : records.find((record) => record.id === selectedOpportunityId) ?? records[0];
   if (selected && !selectedOpportunityId) selectedOpportunityId = selected.id;
   return [
     '<div class="page-heading"><h2>职位记录</h2><p>所有判断、草稿和人工操作都保留追加式历史。</p></div>',
@@ -295,7 +305,11 @@ function recordView(state: AppState): string {
     Object.entries(STATUS_LABELS).map(([value, label]) =>
       '<option value="' + value + '" ' + (recordFilter === value ? "selected" : "") + ">" + label + "</option>"
     ).join(""),
-    '</select><input id="recordSearch" type="search" value="' + escapeHtml(recordSearch) + '" placeholder="搜索职位或公司"></div>',
+    '</select><input id="recordSearch" type="search" maxlength="100" value="' + escapeHtml(recordSearch) + '" placeholder="搜索职位或公司">',
+    '<button id="refreshRecords" type="button">刷新记录</button></div>',
+    '<div class="actions"><button id="previousRecords" type="button" ' + (recordPage === 0 ? "disabled" : "")
+      + '>上一页</button><span>第 ' + String(recordPage + 1) + ' 页</span><button id="nextRecords" type="button" '
+      + (state.recordPage?.hasNext ? "" : "disabled") + '>下一页</button></div>',
     '<div class="record-layout"><div class="record-table">',
     records.map((record) => recordRow(
       record,
@@ -312,11 +326,17 @@ function recordRow(record: OpportunityRecord, selected: boolean, delivery?: Deli
   return '<button type="button" class="record-row ' + (selected ? "selected" : "") + '" data-record-id="'
     + escapeHtml(record.id) + '"><span class="status-dot ' + escapeHtml(delivery?.overallStatus ?? record.status)
     + '"></span><span><b>' + escapeHtml(record.title) + '</b><small>' + escapeHtml(record.company)
-    + " · " + escapeHtml(recordStatusLabel(record, delivery)) + '</small></span><time>'
+    + " · " + escapeHtml(record.platform === "zhaopin" ? "智联招聘" : "猎聘") + " · " + escapeHtml(recordStatusLabel(record, delivery)) + '</small></span><time>'
     + escapeHtml(formatTime(record.lastSeenAt)) + "</time></button>";
 }
 
 function recordDetail(state: AppState, record: OpportunityRecord): string {
+  const oneClickFeedback = reviewAndSendOwnerId === state.auth.userId
+    && reviewAndSendFeedback.opportunityId === record.id ? reviewAndSendFeedback : null;
+  const oneClickBusy = reviewAndSendBusy && Boolean(oneClickFeedback);
+  const canReviewAndSend = record.status === "review_required" && record.platform === "liepin"
+    && state.settings.executionPolicy !== "draft_only"
+    && !state.deliveries.some((item) => item.opportunityId === record.id);
   const evaluation = state.evaluations.find((item) => item.opportunityId === record.id);
   const evaluationProfile = evaluation
     ? state.resumeProfiles.find((profile) => profile.id === evaluation.profileId)
@@ -331,9 +351,11 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
   const canRetryStored = record.status === "failed" && Boolean(record.description?.trim());
   const latestRevision = draft?.revisions
     .filter((revision) => revision.text === draft.currentText)
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))[0];
   const retryableDeliveryStatuses = new Set(["ready", "awaiting_confirmation", "partial", "failed", "review_required"]);
-  const canPrepareReviewedSend = state.settings.executionPolicy !== "draft_only"
+  const canPrepareReviewedSend = record.platform === "liepin"
+    && !oneClickBusy
+    && state.settings.executionPolicy !== "draft_only"
     && record.status === "draft_ready"
     && Boolean(draft && latestRevision)
     && (!delivery || retryableDeliveryStatuses.has(delivery.overallStatus));
@@ -342,7 +364,8 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
   const reviewedBusy = reviewedSendBusyOpportunityId === record.id;
   const reviewedPrepared = reviewedSendPreparedOpportunityId === record.id;
   const reviewedFeedback = reviewedSendFeedback.opportunityId === record.id ? reviewedSendFeedback : null;
-  const draftOnlyLiveBlocked = state.settings.executionPolicy === "draft_only"
+  const draftOnlyLiveBlocked = record.platform === "liepin"
+    && state.settings.executionPolicy === "draft_only"
     && record.status === "draft_ready"
     && Boolean(draft);
   return [
@@ -389,7 +412,9 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
         '<div class="revision"><b>' + (revision.kind === "generated" ? "模型生成" : "用户编辑")
         + '</b><time>' + escapeHtml(formatTime(revision.createdAt)) + '</time><p>' + escapeHtml(revision.text) + "</p></div>"
       ).join("") + "</details></div>" : "",
-    delivery || canPrepareReviewedSend || reviewedFeedback || draftOnlyLiveBlocked
+    record.platform === "zhaopin"
+      ? '<div class="detail-section readonly-platform"><h4>智联招聘首期策略</h4><p>当前只保存职位详情并生成草稿，暂不执行智联招聘真实投递。</p></div>'
+      : delivery || canPrepareReviewedSend || reviewedFeedback || draftOnlyLiveBlocked
       ? '<div class="detail-section reviewed-send" aria-busy="' + String(reviewedBusy) + '"><h4>人工确认投递并打招呼</h4>'
         + '<dl class="delivery-details"><dt>简历</dt><dd>使用猎聘当前默认简历</dd><dt>投递</dt><dd>'
         + escapeHtml(DELIVERY_COMPONENT_LABELS[delivery?.applicationStatus ?? "pending"] ?? "未知") + '</dd><dt>招呼</dt><dd>'
@@ -413,9 +438,21 @@ function recordDetail(state: AppState, record: OpportunityRecord): string {
         + '</div><p id="reviewedSendStatus" class="reviewed-send-status ' + escapeHtml(reviewedFeedback?.kind ?? "idle")
         + '" role="status" aria-live="polite" aria-atomic="true">' + escapeHtml(reviewedFeedback?.message ?? "") + "</p></div>"
       : "",
+    canReviewAndSend || oneClickFeedback
+      ? '<div class="detail-section review-and-send" aria-busy="' + String(oneClickBusy) + '">'
+        + (canReviewAndSend || oneClickBusy
+          ? '<p>点击即确认此职位适合投递：生成招呼语、检查页面后，使用猎聘当前默认简历真实投递并发送，无需再次确认。</p>'
+            + '<button class="primary" data-action="review-and-send" data-id="' + escapeHtml(record.id)
+            + '" aria-busy="' + String(oneClickBusy) + '" ' + (reviewAndSendBusy ? "disabled" : "") + '>'
+            + escapeHtml(oneClickBusy ? oneClickFeedback?.message : "生成并投递") + '</button>'
+          : "")
+        + '<p id="reviewAndSendStatus" role="status" aria-live="polite" aria-atomic="true" class="reviewed-send-status '
+        + escapeHtml(oneClickFeedback?.kind ?? "idle") + '">' + escapeHtml(oneClickFeedback?.message ?? "") + '</p></div>'
+      : "",
     record.status === "review_required"
-      ? '<div class="actions"><button class="primary" data-action="review-continue" data-id="' + escapeHtml(record.id)
-        + '">继续生成</button><button data-action="review-exclude" data-id="' + escapeHtml(record.id)
+      ? '<div class="actions">' + (!canReviewAndSend
+        ? '<button class="primary" data-action="review-continue" data-id="' + escapeHtml(record.id) + '">继续生成</button>' : "")
+        + '<button data-action="review-exclude" data-id="' + escapeHtml(record.id)
         + '">永久排除</button></div>' : "",
     canOverride
       ? '<div class="actions"><button class="primary" data-action="override" data-id="' + escapeHtml(record.id)
@@ -439,17 +476,43 @@ function mainView(state: AppState): string {
   }
 }
 
-async function render(): Promise<void> {
+async function render(refresh = false): Promise<void> {
+  const version = ++renderVersion;
+  const query: AppStateQuery = currentView === "records" ? {
+    view: currentView, page: recordPage, recordFilter, recordSearch,
+    ...(selectedOpportunityId ? { opportunityId: selectedOpportunityId } : {})
+  } : { view: currentView };
+  const key = JSON.stringify(query);
   let state: AppState;
   try {
-    state = await sendCommand<AppState>({ type: "GET_APP_STATE" });
+    let pending = refresh ? undefined : pendingStateReads.get(key);
+    if (!pending) {
+      pending = sendCommand<AppState>({ type: "GET_APP_STATE", ...query, ...(refresh ? { refresh: true } : {}) });
+      pendingStateReads.set(key, pending);
+      const request = pending;
+      void pending.finally(() => {
+        if (pendingStateReads.get(key) === request) pendingStateReads.delete(key);
+      }).catch(() => undefined);
+    }
+    state = await pending;
+    if (version !== renderVersion) return;
   } catch (error) {
+    if (version !== renderVersion) return;
     app.innerHTML = '<div class="fatal">' + escapeHtml(error instanceof Error ? error.message : error) + "</div>";
     return;
   }
+  if (displayedOwnerId !== state.auth.userId) {
+    selectedOpportunityId = "";
+    reviewedSendPreparedOpportunityId = "";
+    reviewedSendFeedback = { opportunityId: "", kind: "idle", message: "" };
+    storedRetryFeedback = { opportunityId: "", kind: "idle", message: "" };
+    reviewAndSendFeedback = { opportunityId: "", kind: "idle", message: "" };
+    pendingStateReads.clear();
+  }
+  displayedOwnerId = state.auth.userId;
   const policyStatus = POLICY_STATUS[state.settings.executionPolicy];
   app.innerHTML = [
-    '<aside><div class="brand"><span>JF</span><div><b>JobFlow</b><small>猎聘草稿助手</small></div></div>',
+    '<aside><div class="brand"><span>JF</span><div><b>JobFlow</b><small>求职草稿助手</small></div></div>',
     '<nav>', navMarkup(), '</nav><div class="mode"><span></span><div><b>' + escapeHtml(policyStatus.title)
       + '</b><small>' + escapeHtml(policyStatus.note) + '</small></div></div></aside>',
     '<main><header><div><b>' + escapeHtml(state.auth.email || "未登录") + '</b><small>'
@@ -562,18 +625,45 @@ function bindActions(state: AppState): void {
   document.querySelectorAll<HTMLElement>("[data-record-id]").forEach((button) => {
     button.addEventListener("click", () => {
       selectedOpportunityId = button.dataset.recordId || "";
+      showRecordLoading();
       void render();
     });
   });
   document.querySelector("#recordFilter")?.addEventListener("change", (event) => {
-    recordFilter = (event.currentTarget as HTMLSelectElement).value;
+    recordFilter = (event.currentTarget as HTMLSelectElement).value as AppStateQuery["recordFilter"];
+    recordPage = 0;
     selectedOpportunityId = "";
+    showRecordLoading();
     void render();
   });
   document.querySelector("#recordSearch")?.addEventListener("change", (event) => {
-    recordSearch = (event.currentTarget as HTMLInputElement).value;
+    recordSearch = (event.currentTarget as HTMLInputElement).value.trim().slice(0, 100);
+    recordPage = 0;
     selectedOpportunityId = "";
+    showRecordLoading();
     void render();
+  });
+  document.querySelector("#previousRecords")?.addEventListener("click", () => {
+    if (recordPage === 0) return;
+    recordPage -= 1;
+    selectedOpportunityId = "";
+    showRecordLoading();
+    void render();
+  });
+  document.querySelector("#nextRecords")?.addEventListener("click", () => {
+    if (!state.recordPage?.hasNext) return;
+    recordPage += 1;
+    selectedOpportunityId = "";
+    showRecordLoading();
+    void render();
+  });
+  document.querySelector("#refreshRecords")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    if (button.disabled) return;
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    button.textContent = "正在刷新";
+    await render(true);
   });
   document.querySelector("#provider")?.addEventListener("change", (event) => {
     const provider = (event.currentTarget as HTMLSelectElement).value;
@@ -600,11 +690,30 @@ function bindActions(state: AppState): void {
   for (const input of factApprovals) input.addEventListener("change", syncFactApprovalMaster);
   syncFactApprovalMaster();
   document.querySelectorAll<HTMLElement>("[data-action]").forEach((button) => {
+    if (reviewAndSendBusy && button.dataset.id === reviewAndSendFeedback.opportunityId
+      && button instanceof HTMLButtonElement) button.disabled = true;
     button.addEventListener("click", () => void handleAction(button.dataset.action || "", button, state));
   });
 }
 
+function showRecordLoading(): void {
+  document.querySelector(".record-detail")?.setAttribute("aria-busy", "true");
+  document.querySelectorAll<HTMLButtonElement>(".record-detail [data-action], #previousRecords, #nextRecords")
+    .forEach((button) => { button.disabled = true; });
+  const refresh = document.querySelector<HTMLButtonElement>("#refreshRecords");
+  if (refresh) {
+    refresh.disabled = true;
+    refresh.setAttribute("aria-busy", "true");
+    refresh.textContent = "正在加载记录";
+  }
+}
+
 async function handleAction(action: string, target: HTMLElement, state: AppState): Promise<void> {
+  if (reviewAndSendBusy && target.dataset.id === reviewAndSendFeedback.opportunityId) return;
+  if (action === "review-and-send") {
+    await runReviewAndSend(target.dataset.id || "", state);
+    return;
+  }
   if (action === "import-resume") {
     await runResumeImport(state);
     return;
@@ -626,12 +735,16 @@ async function handleAction(action: string, target: HTMLElement, state: AppState
   target.textContent = ACTION_BUSY_LABELS[action] || "处理中";
   try {
     if (action === "login" || action === "register") {
+      renderVersion += 1;
+      pendingStateReads.clear();
       await sendCommand({
         type: action === "login" ? "AUTH_LOGIN" : "AUTH_REGISTER",
         email: inputValue("email"),
         password: inputValue("password")
       });
     } else if (action === "logout") {
+      renderVersion += 1;
+      pendingStateReads.clear();
       await sendCommand({ type: "AUTH_LOGOUT" });
     } else if (action === "save-interface") {
       await sendCommand({
@@ -684,7 +797,7 @@ async function handleAction(action: string, target: HTMLElement, state: AppState
       const url = target.dataset.url;
       if (url) await chrome.tabs.create({ url, active: true });
     }
-    await render();
+    if (action !== "open-job") await render(true);
     showToast(ACTION_SUCCESS_LABELS[action] || "操作已完成");
   } catch (error) {
     showToast(error instanceof Error ? error.message : String(error), true);
@@ -693,6 +806,50 @@ async function handleAction(action: string, target: HTMLElement, state: AppState
     target.setAttribute("aria-busy", "false");
     target.disabled = originallyDisabled;
     target.textContent = originalLabel;
+  }
+}
+
+function updateReviewAndSendProgress(message: string): void {
+  reviewAndSendFeedback.message = message;
+  const button = document.querySelector<HTMLButtonElement>('[data-action="review-and-send"]');
+  if (button?.dataset.id === reviewAndSendFeedback.opportunityId) {
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    button.textContent = message;
+    document.querySelector(".review-and-send")?.setAttribute("aria-busy", "true");
+    const status = document.querySelector("#reviewAndSendStatus");
+    if (status) status.textContent = message;
+  }
+  document.querySelectorAll<HTMLButtonElement>('[data-action][data-id]').forEach((control) => {
+    if (control.dataset.id === reviewAndSendFeedback.opportunityId) control.disabled = true;
+  });
+}
+
+async function runReviewAndSend(opportunityId: string, state: AppState): Promise<void> {
+  if (!opportunityId || reviewAndSendBusy || reviewedSendBusyOpportunityId) return;
+  reviewAndSendBusy = true;
+  selectedOpportunityId = opportunityId;
+  reviewAndSendOwnerId = state.auth.userId || "";
+  reviewAndSendFeedback = { opportunityId, kind: "progress", message: REVIEW_AND_SEND_STAGES.generating };
+  updateReviewAndSendProgress(REVIEW_AND_SEND_STAGES.generating);
+  try {
+    const result = await sendCommand<DeliveryRecord>({ type: "REVIEW_AND_SEND", opportunityId });
+    reviewAndSendFeedback = {
+      opportunityId,
+      kind: result.overallStatus === "succeeded" ? "success" : "error",
+      message: result.overallStatus === "succeeded" ? "已完成投递并发送招呼语"
+        : deliveryDisplayReason(result) || "发送结果需要复核，请查看投递记录；不会自动重复发送"
+    };
+  } catch (error) {
+    reviewAndSendFeedback = {
+      opportunityId,
+      kind: "error",
+      message: error instanceof Error ? error.message : String(error)
+    };
+  } finally {
+    reviewAndSendBusy = false;
+    reviewedSendPreparedOpportunityId = "";
+    await render(true);
   }
 }
 
@@ -728,7 +885,7 @@ async function runStoredOpportunityRetry(opportunityId: string): Promise<void> {
       message: "重试完成，职位处理记录已更新"
     };
     storedRetryBusyOpportunityId = "";
-    await render();
+    await render(true);
   } catch (error) {
     storedRetryFeedback = {
       opportunityId,
@@ -736,7 +893,7 @@ async function runStoredOpportunityRetry(opportunityId: string): Promise<void> {
       message: error instanceof Error ? error.message : String(error)
     };
     storedRetryBusyOpportunityId = "";
-    await render();
+    await render(true);
   }
 }
 
@@ -785,7 +942,7 @@ async function runReviewedSend(confirmSend: boolean, opportunityId: string, draf
       message: confirmSend ? "已执行一次真实发送流程，请查看投递组件状态" : "发送前检查通过，请确认是否真实投递并发送"
     };
     reviewedSendBusyOpportunityId = "";
-    await render();
+    await render(true);
   } catch (error) {
     reviewedSendFeedback = {
       opportunityId,
@@ -794,7 +951,7 @@ async function runReviewedSend(confirmSend: boolean, opportunityId: string, draf
     };
     reviewedSendBusyOpportunityId = "";
     reviewedSendPreparedOpportunityId = "";
-    await render();
+    await render(true);
   }
 }
 
@@ -826,7 +983,7 @@ async function runResumeImport(state: AppState): Promise<void> {
   try {
     await importResume(state);
     updateResumeImportFeedback({ kind: "progress", message: "正在加载画像" }, true);
-    await render();
+    await render(true);
     updateResumeImportFeedback({
       kind: "success",
       message: "画像已生成，请审核并确认允许引用的事实"
@@ -878,5 +1035,15 @@ function showToast(message: string, error = false): void {
     toast.className = "";
   }, 3500);
 }
+
+chrome.runtime.onMessage?.addListener((message: unknown, sender) => {
+  if (sender.id !== chrome.runtime.id || sender.tab) return;
+  const parsed = reviewAndSendProgressSchema.safeParse(message);
+  if (parsed.success && reviewAndSendBusy
+    && parsed.data.opportunityId === reviewAndSendFeedback.opportunityId
+    && parsed.data.ownerId === reviewAndSendOwnerId) {
+    updateReviewAndSendProgress(REVIEW_AND_SEND_STAGES[parsed.data.stage]);
+  }
+});
 
 void render();

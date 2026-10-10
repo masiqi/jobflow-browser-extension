@@ -5,11 +5,49 @@ import {
   decodeRuntimeRequest,
   executionPolicySchema,
   extensionSettingsSchema,
-  liepinReviewedSendExecuteCommandSchema
+  liepinReviewedSendExecuteCommandSchema,
+  listCandidateSchema,
+  platformSchema
 } from "../src/domain/messages";
 import { normalizeChatCompletionsEndpoint } from "../src/llm";
 
 describe("runtime and endpoint contracts", () => {
+  it("bounds scoped state reads and rejects arbitrary query instructions", () => {
+    expect(decodeRuntimeRequest({ type: "GET_APP_STATE", view: "records", page: 2,
+      recordFilter: "review_required", recordSearch: "平台", refresh: true })).toMatchObject({ view: "records", page: 2 });
+    for (const fields of [{ page: -1 }, { page: 1.5 }, { page: 100001 }, { recordSearch: "a".repeat(101) },
+      { view: "everything" }, { opportunityId: "wrong" }, { select: "*" }, { recordFilter: "anything" }]) {
+      expect(() => decodeRuntimeRequest({ type: "GET_APP_STATE", ...fields })).toThrow();
+    }
+  });
+  it("binds one-click reviewed sending only to an opportunity UUID", () => {
+    const request = { type: "REVIEW_AND_SEND", opportunityId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" };
+    expect(decodeRuntimeRequest(request)).toEqual(request);
+    for (const extra of [{ text: "arbitrary message" }, { draftRevisionId: request.opportunityId }, { platform: "zhaopin" }, { bypass: true }]) {
+      expect(() => decodeRuntimeRequest({ ...request, ...extra })).toThrow();
+    }
+    expect(() => decodeRuntimeRequest({ ...request, opportunityId: "invalid" })).toThrow();
+  });
+
+  it("accepts both supported platform identities while keeping the shared candidate shape strict", () => {
+    expect(platformSchema.parse("liepin")).toBe("liepin");
+    expect(platformSchema.parse("zhaopin")).toBe("zhaopin");
+    expect(listCandidateSchema.parse({
+      platform: "zhaopin",
+      jobId: "CCLsyntheticJ001",
+      url: "https://www.zhaopin.com/jobdetail/CCLsyntheticJ001.htm",
+      canonicalUrl: "https://www.zhaopin.com/jobdetail/CCLsyntheticJ001.htm",
+      title: "Synthetic role",
+      company: "Synthetic company",
+      location: "北京",
+      salary: "20-30K",
+      experience: "3-5年",
+      education: "本科",
+      cardText: "Synthetic card",
+      index: 0
+    }).platform).toBe("zhaopin");
+  });
+
   it("clears the detail-readiness alarm before filtering or model work", async () => {
     const source = await readFile("src/background.ts", "utf8");
     const handler = source.slice(
@@ -27,7 +65,7 @@ describe("runtime and endpoint contracts", () => {
     expect(persistDetails).toBeGreaterThan(clearAlarm);
     expect(persistDetails).toBeLessThan(handler.indexOf("await activeProfile()"));
     expect(continueProcessing).toBeGreaterThan(persistDetails);
-    expect(postDetail).toContain("evaluateRules(job, settings.rules)");
+    expect(postDetail).toContain("evaluateRules(job, cloudRules ?? settings.rules)");
     expect(postDetail).toContain('invokeModel("evaluate_opportunity"');
     expect(postDetail).not.toContain("chrome.tabs");
   });

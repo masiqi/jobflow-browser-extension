@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const platformSchema = z.literal("liepin");
+export const platformSchema = z.enum(["liepin", "zhaopin"]);
 export const executionPolicySchema = z.enum(["draft_only", "reviewed_send", "automatic_send"]);
 export const detailFailureCodeSchema = z.enum([
   "login_required",
@@ -98,7 +98,7 @@ const batchItemSchema = z.object({
 
 export const batchRunSchema = z.object({
   id: z.string().uuid(),
-  platform: z.literal("liepin"),
+  platform: platformSchema,
   status: z.enum(["queued", "running", "paused", "completed", "cancelled", "failed"]),
   sourceUrl: z.string().url(),
   executionPolicy: executionPolicySchema,
@@ -221,6 +221,13 @@ export const resumeProfileSchema = z.object({
   constraints: z.array(z.string().min(1).max(300)).max(30)
 }).strict();
 
+export const reviewAndSendProgressSchema = z.object({
+  type: z.literal("REVIEW_AND_SEND_PROGRESS"),
+  opportunityId: z.string().uuid(),
+  ownerId: z.string().uuid(),
+  stage: z.enum(["generating", "preflighting", "sending"])
+}).strict();
+
 export const runtimeRequestSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("OPEN_SIDE_PANEL") }).strict(),
   z.object({ type: z.literal("GET_LAUNCHER_VISIBILITY") }).strict(),
@@ -234,7 +241,15 @@ export const runtimeRequestSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("PAUSE_BATCH") }).strict(),
   z.object({ type: z.literal("RESUME_BATCH") }).strict(),
   z.object({ type: z.literal("CANCEL_BATCH") }).strict(),
-  z.object({ type: z.literal("GET_APP_STATE") }).strict(),
+  z.object({
+    type: z.literal("GET_APP_STATE"),
+    view: z.enum(["sidepanel", "records", "resume", "rules", "model", "account"]).optional(),
+    page: z.number().int().min(0).max(100000).optional(),
+    recordFilter: z.enum(["all", "discovered", "queued", "extracting", "deterministic_excluded", "evaluating", "model_excluded", "review_required", "generating", "draft_ready", "user_excluded", "failed"]).optional(),
+    recordSearch: z.string().max(100).optional(),
+    opportunityId: z.string().uuid().optional(),
+    refresh: z.boolean().optional()
+  }).strict(),
   z.object({ type: z.literal("UPDATE_SETTINGS"), settings: extensionSettingsSchema }).strict(),
   z.object({ type: z.literal("AUTH_REGISTER"), email: z.string().email().max(320), password: z.string().min(8).max(128) }).strict(),
   z.object({ type: z.literal("AUTH_LOGIN"), email: z.string().email().max(320), password: z.string().min(1).max(128) }).strict(),
@@ -261,6 +276,8 @@ export const runtimeRequestSchema = z.discriminatedUnion("type", [
     error: z.string().max(500)
   }).strict(),
   z.object({ type: z.literal("RETRY_STORED_OPPORTUNITY"), opportunityId: z.string().uuid() }).strict(),
+  z.object({ type: z.literal("REVIEW_AND_SEND"), opportunityId: z.string().uuid() }).strict(),
+  reviewAndSendProgressSchema,
   reviewedSendIdentitySchema.extend({ type: z.literal("PREPARE_REVIEWED_SEND") }).strict(),
   reviewedSendIdentitySchema.extend({ type: z.literal("CONFIRM_REVIEWED_SEND") }).strict(),
   z.object({ type: z.literal("EDIT_DRAFT"), opportunityId: z.string().uuid(), text: z.string().min(1).max(200) }).strict(),

@@ -2,14 +2,16 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS } from "../src/defaults";
-import type { AppState, BatchRun, OpportunityRecord, ScanPreview } from "../src/types";
+import type { AppState, BatchRun, OpportunityRecord, PlatformKey, ScanPreview } from "../src/types";
 
-function preview(count = 2): ScanPreview {
+function preview(count = 2, platform: PlatformKey = "liepin"): ScanPreview {
   const candidates = Array.from({ length: count }, (_, index) => ({
-    platform: "liepin" as const,
+    platform,
     jobId: String(1980000200 + index),
-    url: `https://www.liepin.com/job/${1980000200 + index}.shtml`,
-    canonicalUrl: `https://www.liepin.com/job/${1980000200 + index}.shtml`,
+    url: platform === "liepin" ? `https://www.liepin.com/job/${1980000200 + index}.shtml`
+      : `https://www.zhaopin.com/jobdetail/${1980000200 + index}.htm`,
+    canonicalUrl: platform === "liepin" ? `https://www.liepin.com/job/${1980000200 + index}.shtml`
+      : `https://www.zhaopin.com/jobdetail/${1980000200 + index}.htm`,
     title: `合成职位 ${index + 1}`,
     company: "合成公司",
     location: "北京",
@@ -20,7 +22,7 @@ function preview(count = 2): ScanPreview {
     index
   }));
   return {
-    sourceUrl: "https://c.liepin.com/",
+    sourceUrl: platform === "liepin" ? "https://c.liepin.com/" : "https://www.zhaopin.com/jobs",
     candidates,
     observedCount: count,
     newCount: count,
@@ -60,7 +62,7 @@ function batchRun(scanPreview: ScanPreview, selectedJobIds: string[], error?: st
   const failed = Boolean(error);
   return {
     id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    platform: "liepin",
+    platform: scanPreview.candidates[0]!.platform,
     status: failed ? "completed" : "running",
     sourceUrl: scanPreview.sourceUrl,
     executionPolicy: "reviewed_send",
@@ -132,6 +134,58 @@ describe("side-panel scan interaction", () => {
     expect(scan.textContent).toContain("扫描当前页");
     expect(scan.classList).toContain("primary");
     expect(scan.querySelector("svg")).not.toBeNull();
+    expect(sendMessage).toHaveBeenCalledWith({ type: "GET_APP_STATE", view: "sidepanel" });
+  });
+
+  it("coalesces notification bursts and never displays a superseded in-flight state", async () => {
+    vi.useFakeTimers();
+    const state = appState(preview(1));
+    let resolveStale!: (response: unknown) => void;
+    const staleRead = new Promise((resolve) => { resolveStale = resolve; });
+    let reads = 0;
+    const sendMessage = vi.fn(async () => {
+      reads += 1;
+      return reads === 2 ? staleRead : { ok: true, data: state };
+    });
+    try {
+      await openSidePanel(sendMessage);
+      const listener = vi.mocked(chrome.runtime.onMessage.addListener).mock.calls[0]![0];
+      for (let i = 0; i < 20; i += 1) listener({ type: "RUN_UPDATED" }, {}, vi.fn());
+      await vi.advanceTimersByTimeAsync(50);
+      expect(reads).toBe(2);
+      for (let i = 0; i < 20; i += 1) listener({ type: "RUN_UPDATED" }, {}, vi.fn());
+      await vi.advanceTimersByTimeAsync(50);
+      expect(reads).toBe(2);
+      resolveStale({ ok: true, data: { ...state, auth: { ...state.auth, email: "stale@example.invalid" } } });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reads).toBe(3);
+      expect(document.body.textContent).not.toContain("stale@example.invalid");
+      expect(sendMessage).toHaveBeenLastCalledWith({ type: "GET_APP_STATE", view: "sidepanel" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("combines scan completion with its pending progress notification into one scoped state read", async () => {
+    vi.useFakeTimers();
+    const state = appState(preview(1));
+    const sendMessage = vi.fn(async (request: { type: string }) => {
+      if (request.type === "SCAN_CURRENT_TAB") {
+        const listener = vi.mocked(chrome.runtime.onMessage.addListener).mock.calls[0]![0];
+        listener({ type: "RUN_UPDATED" }, {}, vi.fn());
+        return { ok: true, data: state.scanPreview };
+      }
+      return { ok: true, data: state };
+    });
+    try {
+      await openSidePanel(sendMessage);
+      document.querySelector<HTMLButtonElement>("#scan")!.click();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(sendMessage.mock.calls.filter(([request]) => request.type === "GET_APP_STATE")).toHaveLength(2);
+      expect(document.querySelector("#scanStatus")?.textContent).toContain("扫描完成");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shows progress immediately, blocks duplicates, and reports completion", async () => {
@@ -200,6 +254,7 @@ describe("side-panel scan interaction", () => {
     const refresh = document.querySelector("#refresh") as HTMLButtonElement;
     refresh.click();
     await vi.waitFor(() => expect(getStateCalls).toBe(2));
+    expect(sendMessage).toHaveBeenLastCalledWith({ type: "GET_APP_STATE", view: "sidepanel", refresh: true });
     expect(refresh.disabled).toBe(true);
     expect(refresh.getAttribute("aria-busy")).toBe("true");
     expect(document.querySelector("#scanStatus")?.textContent).toContain("正在刷新状态");
@@ -275,6 +330,88 @@ describe("side-panel scan interaction", () => {
         expectedExecutionPolicy: "automatic_send"
       });
   });
+
+  it("keeps the Zhaopin first increment read-only even when automatic mode is configured", async () => {
+    const scanPreview = preview(2);
+    scanPreview.sourceUrl = "https://www.zhaopin.com/sou/";
+    scanPreview.candidates = scanPreview.candidates.map((candidate) => ({
+      ...candidate,
+      platform: "zhaopin" as const,
+      jobId: "CCL1501502560J4087703081" + candidate.index,
+      url: "https://www.zhaopin.com/jobdetail/CCL1501502560J4087703081" + candidate.index + ".htm",
+      canonicalUrl: "https://www.zhaopin.com/jobdetail/CCL1501502560J4087703081" + candidate.index + ".htm"
+    }));
+    scanPreview.processableJobIds = scanPreview.candidates.map((candidate) => candidate.jobId);
+    scanPreview.selectedJobIds = [...scanPreview.processableJobIds];
+    const state = appState(scanPreview);
+    state.settings.executionPolicy = "automatic_send";
+    const sendMessage = vi.fn(async () => ({ ok: true, data: state }));
+    await openSidePanel(sendMessage);
+
+    expect(document.querySelector(".status-band")?.textContent).toContain("智联招聘");
+    expect(document.querySelector(".status-band")?.textContent).toContain("不执行智联招聘真实投递");
+    expect(document.querySelector("#start")?.textContent).toContain("开始生成");
+    expect(document.querySelector("#start")?.textContent).not.toContain("一键投递");
+  });
+
+  it.each(["completed", "cancelled", "failed"] as const)(
+    "uses the new scan's platform for real-send authorization after a %s batch",
+    async (status) => {
+      const oldPreview = preview(1, "zhaopin");
+      const liepinPreview = preview(2);
+      const state = appState(liepinPreview);
+      state.settings.executionPolicy = "automatic_send";
+      state.run = { ...batchRun(oldPreview, oldPreview.selectedJobIds), status };
+      const sendMessage = vi.fn(async (request: { type: string }) =>
+        request.type === "GET_APP_STATE" ? { ok: true, data: state } : { ok: true });
+      await openSidePanel(sendMessage);
+
+      expect(document.querySelector(".status-band")?.textContent).toContain("平台：猎聘");
+      const start = document.querySelector<HTMLButtonElement>("#start")!;
+      expect(start.textContent).toContain("一键投递并打招呼 2 个职位");
+      expect(start.classList).toContain("automatic-action");
+      expect(start.disabled).toBe(false);
+      start.click();
+      await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({
+        type: "START_BATCH", selectedJobIds: liepinPreview.selectedJobIds,
+        expectedExecutionPolicy: "automatic_send"
+      }));
+    }
+  );
+
+  it.each(["completed", "cancelled", "failed"] as const)(
+    "labels a new Zhaopin scan as generation-only after a %s Liepin batch",
+    async (status) => {
+      const oldPreview = preview(1);
+      const state = appState(preview(2, "zhaopin"));
+      state.settings.executionPolicy = "automatic_send";
+      state.run = { ...batchRun(oldPreview, oldPreview.selectedJobIds), status };
+      const sendMessage = vi.fn(async () => ({ ok: true, data: state }));
+      await openSidePanel(sendMessage);
+
+      expect(document.querySelector(".status-band")?.textContent).toContain("不执行智联招聘真实投递");
+      const start = document.querySelector<HTMLButtonElement>("#start")!;
+      expect(start.textContent).toBe("开始生成");
+      expect(start.classList).not.toContain("automatic-action");
+      expect(start.disabled).toBe(false);
+    }
+  );
+
+  it.each(["queued", "running", "paused"] as const)(
+    "keeps a %s batch's platform while another platform's scan is visible",
+    async (status) => {
+      const oldPreview = preview(1, "zhaopin");
+      const state = appState(preview(2));
+      state.settings.executionPolicy = "automatic_send";
+      state.run = { ...batchRun(oldPreview, oldPreview.selectedJobIds), status };
+      const sendMessage = vi.fn(async () => ({ ok: true, data: state }));
+      await openSidePanel(sendMessage);
+
+      expect(document.querySelector(".status-band")?.textContent).toContain("平台：智联招聘");
+      expect(document.querySelector<HTMLButtonElement>("#start")!.disabled).toBe(true);
+      expect(document.querySelector("#start")?.textContent).toBe("批次进行中");
+    }
+  );
 
   it("selects and clears only processable jobs with the master checkbox", async () => {
     const scanPreview = preview(3);
@@ -383,6 +520,7 @@ describe("side-panel scan interaction", () => {
 
       vi.advanceTimersByTime(1100);
       expect(document.querySelector(".run-wait")?.textContent).toContain("2 秒");
+      expect(sendMessage).toHaveBeenCalledOnce();
 
       state.run.nextWriteEligibleAt = undefined;
       state.run.items[0]!.status = "delivery_ready";

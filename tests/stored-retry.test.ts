@@ -4,6 +4,8 @@ import type { ExtensionSettings, OpportunityRecord, ResumeProfile } from "../src
 
 const backend = vi.hoisted(() => ({
   getAuthProjection: vi.fn(),
+  getOpportunity: vi.fn(),
+  loadActiveFilterConfig: vi.fn(),
   invokeModelGateway: vi.fn(),
   listOpportunities: vi.fn(),
   listResumeProfiles: vi.fn()
@@ -140,6 +142,9 @@ describe("stored opportunity retry", () => {
       vip: true
     });
     backend.listOpportunities.mockResolvedValue([failedOpportunity()]);
+    backend.loadActiveFilterConfig.mockResolvedValue(null);
+    backend.getOpportunity.mockImplementation(async (id: string) =>
+      (await backend.listOpportunities()).find((item: OpportunityRecord) => item.id === id) ?? null);
     backend.listResumeProfiles.mockResolvedValue([activeProfile()]);
     storage.loadSettings.mockResolvedValue(managedSettings());
     storage.getByokKey.mockResolvedValue("");
@@ -184,6 +189,14 @@ describe("stored opportunity retry", () => {
     ]);
     expect(requests[0]?.payload.job?.description).toBe(failedOpportunity().description);
     expect(requests[1]?.payload.job?.description).toBe(failedOpportunity().description);
+    expect(createTab).not.toHaveBeenCalled();
+  });
+
+  it("uses cloud rules without relying on a prior display read to persist them locally", async () => {
+    backend.getOpportunity.mockResolvedValue(failedOpportunity({ description: "该岗位要求长期出差，必须接受频繁出差。" }));
+    backend.loadActiveFilterConfig.mockResolvedValue({ ...DEFAULT_SETTINGS.rules, travel: "none" });
+    expect(await dispatchRetry()).toEqual({ ok: true });
+    expect(backend.invokeModelGateway.mock.calls.map(([request]) => request.operation)).toEqual(["record_filter"]);
     expect(createTab).not.toHaveBeenCalled();
   });
 

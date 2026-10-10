@@ -14,6 +14,13 @@ import type {
 
 const backend = vi.hoisted(() => ({
   getAuthProjection: vi.fn(),
+  getDraft: vi.fn(),
+  getCurrentDraft: vi.fn(),
+  getOpportunity: vi.fn(),
+  getOpportunityByPlatform: vi.fn(),
+  listCandidateIdentities: vi.fn(),
+  listOpportunityPage: vi.fn(),
+  loadActiveFilterConfig: vi.fn(),
   invokeModelGateway: vi.fn(),
   listDeliveryRecords: vi.fn(),
   listDrafts: vi.fn(),
@@ -259,10 +266,12 @@ async function dispatchDetail(job: DetailJob): Promise<{ ok: boolean; error?: st
 }
 
 async function dispatchDetailWithLease(job: DetailJob, targetLeaseId: string): Promise<{ ok: boolean; error?: string }> {
+  const storedRun = batchRunSchema.safeParse(localData[STORAGE_KEYS.run]);
+  const tabId = storedRun.success ? storedRun.data.items[storedRun.data.currentIndex]?.tabId ?? 101 : 101;
   return new Promise((resolve) => {
     runtimeListener?.(
       { type: "DETAIL_READY", leaseId: targetLeaseId, job },
-      {} as chrome.runtime.MessageSender,
+      liepinContentSender({ tab: { id: tabId } as chrome.tabs.Tab }),
       (response) => resolve(response as { ok: boolean; error?: string })
     );
   });
@@ -362,6 +371,16 @@ describe("batch run persistence", () => {
     backend.listDrafts.mockResolvedValue([]);
     backend.listEvaluations.mockResolvedValue([]);
     backend.listOpportunities.mockResolvedValue([opportunity()]);
+    backend.getOpportunity.mockImplementation(async (id: string) =>
+      (await backend.listOpportunities()).find((item: OpportunityRecord) => item.id === id) ?? null);
+    backend.getDraft.mockImplementation(async (id: string) =>
+      (await backend.listDrafts()).find((item: MessageDraft) => item.opportunityId === id) ?? null);
+    backend.getCurrentDraft.mockImplementation((id: string) => backend.getDraft(id));
+    backend.getOpportunityByPlatform.mockImplementation(async (platform: string, jobId: string) =>
+      (await backend.listOpportunities()).find((item: OpportunityRecord) => item.platform === platform && item.platformJobId === jobId) ?? null);
+    backend.listCandidateIdentities.mockImplementation(async () => backend.listOpportunities());
+    backend.listOpportunityPage.mockResolvedValue({ opportunities: [], hasNext: false });
+    backend.loadActiveFilterConfig.mockResolvedValue(null);
     backend.listOpportunityEvents.mockResolvedValue([]);
     backend.listResumeProfiles.mockResolvedValue([]);
     backend.markReviewedDeliveryWriteStarted.mockResolvedValue(undefined);
@@ -376,6 +395,169 @@ describe("batch run persistence", () => {
     backend.releaseReviewedDeliveryQuota.mockResolvedValue(true);
     backend.reserveReviewedDeliveryQuota.mockResolvedValue("ffffffff-ffff-4fff-8fff-ffffffffffff");
     await loadBackground();
+  });
+
+  function mockOneClickReview() {
+    delete localData[STORAGE_KEYS.run];
+    localData[STORAGE_KEYS.settings] = settings({}, {
+      executionPolicy: "reviewed_send",
+      model: { ...DEFAULT_SETTINGS.model, route: "managed" }
+    });
+    const record = { ...opportunity(), description: "负责建设高可用任务平台和稳定性体系。", status: "review_required" as OpportunityRecord["status"] };
+    backend.listOpportunities.mockImplementation(async () => [record]);
+    backend.listResumeProfiles.mockResolvedValue([activeProfile()]);
+    backend.invokeModelGateway.mockImplementation(async (request: { operation: string }) => {
+      if (request.operation !== "generate_greeting") throw new Error("Unexpected suitability reevaluation");
+      record.status = "draft_ready";
+      backend.listDrafts.mockResolvedValue([draft()]);
+      return { ok: true, result: { greeting: draft().currentText, factIds: ["fact-1"], jdEvidence: ["负责建设高可用任务平台"] } };
+    });
+    (chrome.tabs.query as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: 101, url: record.canonicalUrl } as chrome.tabs.Tab]);
+    (chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (_tabId: number, message: { type?: string }) => {
+      if (message.type === "CONTENT_REVIEWED_SEND_PREFLIGHT") {
+        return { ok: true, platformJobId: record.platformJobId, resumeMode: "platform_default", actionTier: "primary" };
+      }
+      return { ok: true, application: "verified", greeting: "verified", evidenceCodes: ["application_confirmed", "outbound_greeting_exact_match"] };
+    });
+    return record;
+  }
+
+  const optionsSender = { id: "jobflow-extension-id", url: "chrome-extension://jobflow-extension-id/options.html" };
+  const oneClickRequest = { type: "REVIEW_AND_SEND", opportunityId };
+
+  it("generates and sends an approved pending-review opportunity from one command without reevaluating suitability", async () => {
+    mockOneClickReview();
+    const result = await dispatchRuntime(oneClickRequest, optionsSender);
+    expect(result).toMatchObject({ ok: true, data: { overallStatus: "succeeded" } });
+    expect(modelOperations()).toEqual(["generate_greeting"]);
+    expect(backend.prepareReviewedDelivery).toHaveBeenCalledWith(opportunityId, draft().revisions[0]!.id, await sourceHash(draft().currentText));
+    expect(backend.recordReviewedDeliveryAttempt).toHaveBeenCalledWith(expect.objectContaining({ eventKind: "delivery_confirmed", evidenceCode: "user_confirmed" }));
+    expect((chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>).mock.calls.filter(([, message]) => message.type === "CONTENT_REVIEWED_SEND_EXECUTE")).toHaveLength(1);
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(101, expect.objectContaining({ type: "CONTENT_REVIEWED_SEND_EXECUTE", assumeClickSuccess: false }));
+    const stages = (chrome.runtime.sendMessage as unknown as ReturnType<typeof vi.fn>).mock.calls.map(([message]) => message).filter((message) => message.type === "REVIEW_AND_SEND_PROGRESS");
+    expect(stages.map((message) => message.stage)).toEqual(["generating", "preflighting", "sending"]);
+    expect(await dispatchRuntime(oneClickRequest, optionsSender)).toMatchObject({ ok: false });
+    expect(modelOperations()).toEqual(["generate_greeting"]);
+  });
+
+  it("uses exact persisted identities for one-click delivery even when the management lists omit the target", async () => {
+    const record = mockOneClickReview();
+    backend.getOpportunity.mockImplementation(async () => record);
+    backend.getDraft.mockImplementation(async () => record.status === "draft_ready" ? draft() : null);
+    backend.listOpportunities.mockResolvedValue([]);
+    backend.listDrafts.mockResolvedValue([]);
+    const result = await dispatchRuntime(oneClickRequest, optionsSender);
+    expect(result).toMatchObject({ ok: true, data: { overallStatus: "succeeded" } });
+    expect(backend.getOpportunity).toHaveBeenCalledWith(opportunityId);
+    expect(backend.getDraft).toHaveBeenCalledWith(opportunityId);
+    expect(backend.listOpportunities).not.toHaveBeenCalled();
+    expect(backend.listDrafts).not.toHaveBeenCalled();
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(101, expect.objectContaining({ type: "CONTENT_REVIEWED_SEND_EXECUTE" }));
+  });
+
+  it.each(["missing_draft", "missing_revision", "mismatched_text"])("fails closed before opening a tab when the exact draft has %s", async (condition) => {
+    mockOneClickReview();
+    backend.getDraft.mockResolvedValue(condition === "missing_draft" ? null : {
+      ...draft(),
+      revisions: condition === "missing_revision" ? [] : draft().revisions.map((revision) => ({ ...revision, text: "different text" }))
+    });
+    expect(await dispatchRuntime(oneClickRequest, optionsSender)).toMatchObject({ ok: false, error: "当前草稿修订不存在" });
+    expect(chrome.tabs.create).not.toHaveBeenCalled();
+    expect(chrome.tabs.sendMessage).not.toHaveBeenCalled();
+    expect(backend.prepareReviewedDelivery).not.toHaveBeenCalled();
+    expect(backend.reserveReviewedDeliveryQuota).not.toHaveBeenCalled();
+    expect(backend.markReviewedDeliveryWriteStarted).not.toHaveBeenCalled();
+  });
+
+  it.each(["sender", "platform", "state", "owner", "policy", "delivery", "batch"])("rejects one-click review for invalid %s before generation or platform actions", async (condition) => {
+    const record = mockOneClickReview();
+    if (condition === "platform") record.platform = "zhaopin";
+    if (condition === "state") record.status = "user_excluded";
+    if (condition === "owner") record.userId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    if (condition === "policy") localData[STORAGE_KEYS.settings] = settings({}, { executionPolicy: "draft_only" });
+    if (condition === "delivery") backend.listDeliveryRecords.mockResolvedValue([delivery({ overallStatus: "partial" })]);
+    if (condition === "batch") localData[STORAGE_KEYS.run] = runningBatch();
+    expect(await dispatchRuntime(oneClickRequest, condition === "sender" ? liepinContentSender() : optionsSender)).toMatchObject({ ok: false });
+    expect(backend.invokeModelGateway).not.toHaveBeenCalled();
+    expect(chrome.tabs.sendMessage).not.toHaveBeenCalled();
+    expect(backend.reserveReviewedDeliveryQuota).not.toHaveBeenCalled();
+  });
+
+  it("blocks concurrent approval and conflicting mutations through the entire generation and send flow", async () => {
+    const record = mockOneClickReview();
+    const pendingGeneration = deferred<unknown>();
+    backend.invokeModelGateway.mockReturnValue(pendingGeneration.promise);
+    const first = dispatchRuntime(oneClickRequest, optionsSender);
+    await vi.waitFor(() => expect(backend.invokeModelGateway).toHaveBeenCalledTimes(1));
+    expect(await dispatchRuntime({ type: "GET_APP_STATE", view: "records", opportunityId }, optionsSender))
+      .toMatchObject({ ok: true, data: { recordDetail: { id: opportunityId } } });
+    for (const request of [oneClickRequest,
+      { type: "REVIEW_DECISION", opportunityId, decision: "permanently_exclude" },
+      { type: "REGENERATE_DRAFT", opportunityId },
+      { type: "EDIT_DRAFT", opportunityId, text: "合成草稿" }]) {
+      expect(await dispatchRuntime(request, optionsSender)).toMatchObject({ ok: false, error: expect.stringContaining("正在执行") });
+    }
+    record.status = "draft_ready";
+    backend.listDrafts.mockResolvedValue([draft()]);
+    const pendingPreflight = deferred<unknown>();
+    (chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>).mockReturnValue(pendingPreflight.promise);
+    pendingGeneration.resolve({ ok: true, result: { greeting: draft().currentText, factIds: ["fact-1"], jdEvidence: ["负责建设高可用任务平台"] } });
+    await vi.waitFor(() => expect(chrome.tabs.sendMessage).toHaveBeenCalledTimes(1));
+    expect(await dispatchRuntime(oneClickRequest, optionsSender)).toMatchObject({ ok: false });
+    pendingPreflight.resolve({ ok: false, blocker: "risk_control", reason: "请完成安全验证" });
+    expect(await first).toMatchObject({ ok: false });
+    expect(backend.invokeModelGateway).toHaveBeenCalledTimes(1);
+    expect(backend.reserveReviewedDeliveryQuota).not.toHaveBeenCalled();
+  });
+
+  it.each(["generation", "preflight", "owner_change", "policy_change", "draft_change"])("does not write after one-click %s failure", async (condition) => {
+    mockOneClickReview();
+    if (condition === "generation") backend.invokeModelGateway.mockRejectedValue(new Error("模型请求失败"));
+    else (chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      if (condition === "preflight") return { ok: false, blocker: "risk_control", reason: "请完成安全验证" };
+      if (condition === "owner_change") backend.getAuthProjection.mockResolvedValue({ status: "signed_out" });
+      if (condition === "policy_change") localData[STORAGE_KEYS.settings] = settings({}, { executionPolicy: "draft_only" });
+      if (condition === "draft_change") backend.listDrafts.mockResolvedValue([{ ...draft(), currentText: "已被另一个页面修改" }]);
+      return { ok: true, platformJobId: "1980000401", resumeMode: "platform_default", actionTier: "primary" };
+    });
+    expect(await dispatchRuntime(oneClickRequest, optionsSender)).toMatchObject({ ok: false });
+    expect(backend.reserveReviewedDeliveryQuota).not.toHaveBeenCalled();
+    expect(backend.markReviewedDeliveryWriteStarted).not.toHaveBeenCalled();
+    expect((chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>).mock.calls.some(([, message]) => message.type === "CONTENT_REVIEWED_SEND_EXECUTE")).toBe(false);
+  });
+
+  it("releases an unused reservation when policy changes while reserving quota", async () => {
+    mockOneClickReview();
+    const quota = deferred<string>();
+    backend.reserveReviewedDeliveryQuota.mockReturnValue(quota.promise);
+    const pending = dispatchRuntime(oneClickRequest, optionsSender);
+    await vi.waitFor(() => expect(backend.reserveReviewedDeliveryQuota).toHaveBeenCalledTimes(1));
+    localData[STORAGE_KEYS.settings] = settings({}, { executionPolicy: "draft_only" });
+    quota.resolve("ffffffff-ffff-4fff-8fff-ffffffffffff");
+    expect(await pending).toMatchObject({ ok: false, error: expect.stringContaining("仅生成") });
+    expect(backend.releaseReviewedDeliveryQuota).toHaveBeenCalledWith(opportunityId, "ffffffff-ffff-4fff-8fff-ffffffffffff");
+    expect(backend.markReviewedDeliveryWriteStarted).not.toHaveBeenCalled();
+    expect((chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>).mock.calls.some(([, message]) => message.type === "CONTENT_REVIEWED_SEND_EXECUTE")).toBe(false);
+  });
+
+  it("rechecks one-click policy after final preflight and never replays ambiguous writes", async () => {
+    mockOneClickReview();
+    let preflights = 0;
+    (chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      preflights += 1;
+      if (preflights === 2) localData[STORAGE_KEYS.settings] = settings({}, { executionPolicy: "draft_only" });
+      return { ok: true, platformJobId: "1980000401", resumeMode: "platform_default", actionTier: "primary" };
+    });
+    expect(await dispatchRuntime(oneClickRequest, optionsSender)).toMatchObject({ ok: false });
+    expect(backend.reserveReviewedDeliveryQuota).not.toHaveBeenCalled();
+    mockOneClickReview();
+    (chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (_id: number, message: { type?: string }) => {
+      if (message.type === "CONTENT_REVIEWED_SEND_EXECUTE") throw new Error("transport lost after click");
+      return { ok: true, platformJobId: "1980000401", resumeMode: "platform_default", actionTier: "primary" };
+    });
+    expect(await dispatchRuntime(oneClickRequest, optionsSender)).toMatchObject({ ok: false });
+    expect(await dispatchRuntime(oneClickRequest, optionsSender)).toMatchObject({ ok: false });
+    expect((chrome.tabs.sendMessage as unknown as ReturnType<typeof vi.fn>).mock.calls.filter(([, message]) => message.type === "CONTENT_REVIEWED_SEND_EXECUTE")).toHaveLength(1);
   });
 
   it("keeps detail fields out of the stored batch candidate when the first item needs review", async () => {

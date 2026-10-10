@@ -20,6 +20,8 @@ await build({
   entryPoints: {
     background: resolve("src/background.ts"),
     "content/liepin": resolve("src/content/liepin.ts"),
+    "content/zhaopin": resolve("src/content/zhaopin.ts"),
+    "content/zhaopin-main": resolve("src/content/zhaopin-main.ts"),
     options: resolve("src/options.ts"),
     sidepanel: resolve("src/sidepanel.ts")
   },
@@ -38,7 +40,7 @@ await build({
     __JOBFLOW_SUPABASE_PUBLISHABLE_KEY__: JSON.stringify(supabasePublishableKey)
   }
 });
-for (const relativePath of ["background.js", "content/liepin.js", "options.js", "sidepanel.js"]) {
+for (const relativePath of ["background.js", "content/liepin.js", "content/zhaopin.js", "content/zhaopin-main.js", "options.js", "sidepanel.js"]) {
   const path = resolve("dist", relativePath);
   const source = await readFile(path, "utf8");
   await writeFile(path, source.replace(/[ \t]+$/gm, ""), "utf8");
@@ -51,13 +53,17 @@ await cp(resolve("node_modules/pdfjs-dist/build/pdf.worker.min.mjs"), resolve("d
 
 const manifest = {
   manifest_version: 3,
-  name: "JobFlow 猎聘草稿助手",
+  name: "JobFlow 求职草稿助手",
   version: "0.2.0",
-  description: "读取猎聘公开页面、生成草稿，并支持管理台逐条确认投递",
+  description: "读取招聘网站公开页面并生成可审核的求职草稿",
   permissions: ["storage", "tabs", "alarms", "sidePanel"],
-  host_permissions: ["https://*.liepin.com/*", ...(supabaseOrigin ? [supabaseOrigin] : [])],
+  host_permissions: ["https://*.liepin.com/*", "https://www.zhaopin.com/*", ...(supabaseOrigin ? [supabaseOrigin] : [])],
   background: { service_worker: "background.js" },
-  content_scripts: [{ matches: ["https://*.liepin.com/*"], js: ["content/liepin.js"], run_at: "document_idle" }],
+  content_scripts: [
+    { matches: ["https://*.liepin.com/*"], js: ["content/liepin.js"], run_at: "document_idle" },
+    { matches: ["https://www.zhaopin.com/*"], js: ["content/zhaopin-main.js"], run_at: "document_idle", world: "MAIN" },
+    { matches: ["https://www.zhaopin.com/*"], js: ["content/zhaopin.js"], run_at: "document_idle" }
+  ],
   side_panel: { default_path: "sidepanel.html" },
   options_page: "options.html",
   action: { default_title: "打开 JobFlow" }

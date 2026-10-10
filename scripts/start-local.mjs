@@ -19,7 +19,7 @@ if (args.has("--help") || args.has("-h")) {
     "Usage: node scripts/start-local.mjs [--dry-run]",
     "",
     "Restarts only this repository's local Supabase project, starts model-gateway,",
-    "waits for local health, and rebuilds dist with .env.local's public key.",
+    "applies pending local migrations, waits for health, and rebuilds dist with .env.local's public key.",
     "The database volume is preserved; this command never runs supabase db reset.",
     "",
     "Options:",
@@ -199,8 +199,9 @@ async function main() {
       "dry-run：",
       "1. 停止当前仓库目录下的 model-gateway 进程",
       "2. 重启 Supabase 项目 " + projectId + "（保留数据卷）",
-      "3. 启动 supabase functions serve model-gateway",
-      "4. 用 .env.local 的本地公开 PUBLISHABLE_KEY 重建 dist"
+      "3. 应用待执行的本地数据库迁移（不执行 db reset）",
+      "4. 启动 supabase functions serve model-gateway",
+      "5. 用 .env.local 的本地公开 PUBLISHABLE_KEY 重建 dist"
     ].join("\n"));
     return;
   }
@@ -211,6 +212,7 @@ async function main() {
   run("supabase", ["start", "--ignore-health-check"], "启动当前 Supabase 项目");
   await waitForHttp(localSupabaseUrl + "/rest/v1/", [200], 30_000);
   await waitForHttp(localSupabaseUrl + "/auth/v1/health", [200], 30_000);
+  run("supabase", ["migration", "up", "--local"], "应用本地数据库迁移");
 
   const config = publicBuildConfig();
   const functionEnvPath = process.env.JOBFLOW_FUNCTION_ENV_FILE
@@ -245,7 +247,7 @@ async function main() {
     "- model-gateway 日志: " + logPath,
     "- dist 已用本地 PUBLISHABLE_KEY 构建（未使用 ANON/SECRET/SERVICE_ROLE key）",
     "",
-    "下一步：打开 chrome://extensions Reload JobFlow，然后完整刷新猎聘列表页；旧详情标签页请关闭后重新打开。",
+    "下一步：打开 chrome://extensions Reload JobFlow，然后完整刷新猎聘或智联招聘列表页；旧详情标签页请关闭后重新打开。",
     "该脚本不会执行 supabase db reset，因此不会删除本地账号、画像或职位记录。"
   ].join("\n"));
 }
