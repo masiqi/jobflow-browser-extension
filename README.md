@@ -242,11 +242,11 @@ npm run smoke:extension
 
 ## 本地 Supabase
 
-启动并重放数据库：
+启动服务并应用尚未执行的迁移（保留已有数据）：
 
 ~~~bash
 supabase start
-supabase db reset
+supabase migration up --local
 supabase test db
 ~~~
 
@@ -412,7 +412,14 @@ npm run smoke:extension
 
 ## 远程 Supabase
 
-本仓库没有连接、迁移或部署任何远程 Supabase 项目。远程操作会改变外部状态，必须先明确目标项目并单独执行：
+项目支持 Supabase Cloud，浏览器扩展通过构建时指定的项目 URL 和公开 Key 连接。
+部署数据库迁移与 `model-gateway` 后，无需额外启动应用后端。环境文件和连接信息
+保留在本机，Git 中的默认构建不绑定任何项目。首次部署时明确目标项目后执行：
+
+如果把 Supabase 自托管在局域网机器上，推荐保留扩展现有的精确本地 origin，通过 SSH
+隧道转发到远端独立端口，而不是把局域网 IP 加入扩展 host permissions。完整的远端
+运行目录、systemd 用户服务、端口模板、启动/停止和升级说明见
+[docs/remote-deployment.md](docs/remote-deployment.md)。
 
 ~~~text
 supabase login

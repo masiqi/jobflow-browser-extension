@@ -145,6 +145,9 @@ Runtime requests:
 - Reject unknown fields with strict Zod objects.
 - Live behavior exists only in strict reviewed-send prepare/confirm commands, explicit options-page `REVIEW_AND_SEND`, or in a side-panel `automatic_send` batch whose selected IDs and execution policy were explicitly authorized at start. Page-load, scan, settings save, startup, scroll, pagination, upload, and free-form platform commands cannot write to Liepin.
 - Content scan returns sourceUrl plus at most 500 decoded list candidates.
+- Side-panel platform and next-start wording use a batch's platform only while
+  it is queued, running or paused. Completed/cancelled/failed historical batches
+  must not override the current scan's platform or hide real-write wording.
 - A batch accepts 1 through 500 selected platform job IDs from the current scan snapshot. There is no separate per-batch selection limit below that structural cap. Batch start is accepted only from the exact extension side panel URL, must include the expected execution policy, must match trusted settings, and must fail if another queued/running/paused run already exists.
 - Stored-detail retry accepts only an opportunity UUID. JD text, profile data, model credentials, and status cannot be supplied by the page command.
 - Detail-page lease handshake accepts only a platform job ID from a trusted Liepin content sender. It returns the current extension-owned item lease only when sender tab ID, sender URL, current batch item, current job ID, item status, and run status match. It returns no lease for user-opened details, options/sidepanel callers, wrong tabs/jobs, historical items, completed/cancelled runs, or non-Liepin origins.

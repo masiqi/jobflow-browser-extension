@@ -72,7 +72,9 @@ const POLICY_LABELS: Record<AppState["settings"]["executionPolicy"], { title: st
 };
 
 function platformForState(preview: ScanPreview | null, run: BatchRun | null): PlatformKey | null {
-  if (run?.platform) return run.platform;
+  // A terminal batch is history. The next start uses the current scan, so its
+  // platform must also determine the visible generation/live-send authorization.
+  if (run && ["queued", "running", "paused"].includes(run.status)) return run.platform;
   if (preview?.candidates[0]?.platform) return preview.candidates[0].platform;
   if (preview?.sourceUrl) {
     try {

@@ -1,0 +1,17 @@
+[Unit]
+Description=JobFlow remote Supabase stack
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=__JOBFLOW_SERVICE_DIR__
+EnvironmentFile=__JOBFLOW_SERVICE_DIR__/runtime.env
+ExecStart=/usr/bin/sg docker -c __JOBFLOW_CODE_DIR__/deploy/remote/start-supabase.sh
+ExecStop=/usr/bin/sg docker -c __JOBFLOW_CODE_DIR__/deploy/remote/stop-supabase.sh
+TimeoutStartSec=0
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,37 @@
+project_id = "__JOBFLOW_PROJECT_ID__"
+
+[api]
+enabled = true
+port = __JOBFLOW_API_PORT__
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+
+[db]
+port = __JOBFLOW_DB_PORT__
+shadow_port = __JOBFLOW_DB_SHADOW_PORT__
+major_version = 17
+
+[studio]
+enabled = true
+port = __JOBFLOW_STUDIO_PORT__
+
+[local_smtp]
+enabled = true
+port = __JOBFLOW_INBUCKET_PORT__
+
+[analytics]
+enabled = true
+port = __JOBFLOW_ANALYTICS_PORT__
+
+[auth]
+enabled = true
+site_url = "chrome-extension://jobflow-local"
+enable_signup = true
+
+[auth.email]
+enable_signup = true
+double_confirm_changes = false
+enable_confirmations = false
+
+[functions.model-gateway]
+verify_jwt = true

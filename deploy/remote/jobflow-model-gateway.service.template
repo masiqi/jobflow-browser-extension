@@ -1,0 +1,18 @@
+[Unit]
+Description=JobFlow model-gateway Edge Function
+Requires=jobflow-supabase.service
+After=jobflow-supabase.service
+PartOf=jobflow-supabase.service
+
+[Service]
+Type=simple
+WorkingDirectory=__JOBFLOW_SERVICE_DIR__
+EnvironmentFile=__JOBFLOW_SERVICE_DIR__/runtime.env
+ExecStart=/usr/bin/sg docker -c __JOBFLOW_CODE_DIR__/deploy/remote/start-model-gateway.sh
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target
